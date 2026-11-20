@@ -1,0 +1,111 @@
+/* Murmint's main window in the Windows 11 manner: Segoe UI Variable, a Mica backdrop (on Windows 11), settings
+   cards with 8px corners, the navigation pill of Windows Settings, and Fluent-style controls, in white, sunlight
+   yellow and orange. Only the main window loads this file; the pill and Better Clipboard keep their own look. */
+:root {
+  --font: 'Segoe UI Variable Text', 'Segoe UI', 'Inter', system-ui, sans-serif;
+  --font-display: 'Segoe UI Variable Display', 'Segoe UI', 'Inter', system-ui, sans-serif;
+  --sun: color-mix(in srgb, var(--accent) 50%, #ffc21a);
+  --grad: linear-gradient(135deg, var(--sun), var(--accent));
+  --r-ctl: 6px; --r-card: 8px; --r-layer: 8px;
+}
+:root[data-theme='light'] {
+  --canvas: #fbf8f4; --bg: #fbf8f4; --sheet: #ffffff; --surface: #fdfbf8; --surface-2: #f6f1ea; --surface-3: #ede5da;
+  --line: rgba(0, 0, 0, .075); --line-strong: rgba(0, 0, 0, .14);
+  --text: #1b1a19; --text-2: #5c5751; --text-3: #8a847d;
+  --layer: rgba(255, 255, 255, .72); --stroke-elev: rgba(0, 0, 0, .14);
+}
+:root[data-theme='dark'] {
+  --canvas: #1c1a18; --bg: #1c1a18; --sheet: #2a2724; --surface: #2e2b28; --surface-2: #34312d; --surface-3: #3d3935;
+  --line: rgba(255, 255, 255, .07); --line-strong: rgba(255, 255, 255, .13);
+  --text: #f7f4f0; --text-2: #c9c2ba; --text-3: #968e86;
+  --layer: rgba(58, 54, 50, .55); --stroke-elev: rgba(255, 255, 255, .06);
+}
+:root:not([data-accent='ember']) { --sun: var(--accent); }
+html, body, button, input, select, textarea { font-family: var(--font) !important; }
+
+/* ---------- the window: Mica shows through the navigation, the page sits on a layer ---------- */
+:root.mica body { background: transparent !important; }
+:root:not(.mica) body { background: radial-gradient(800px 360px at 0% -10%, color-mix(in srgb, var(--sun) 20%, transparent), transparent 70%), var(--canvas) !important; }
+main { background: var(--layer) !important; border: 1px solid var(--line) !important; border-right: 0 !important; border-bottom: 0 !important; border-radius: var(--r-layer) 0 0 0 !important; box-shadow: none !important; }
+:root:not(.mica) main { background: color-mix(in srgb, var(--sheet) 70%, var(--canvas)) !important; }
+main::before { background: radial-gradient(520px 240px at 100% 0%, color-mix(in srgb, var(--sun) 14%, transparent), transparent 70%) !important; opacity: 1 !important; }
+
+/* ---------- navigation, as in Windows Settings ---------- */
+.sidebar { background: transparent !important; }
+.brand b { font-family: var(--font-display) !important; font-weight: 600 !important; letter-spacing: -.01em !important; }
+.nav-label { color: var(--text-3) !important; font-weight: 600 !important; letter-spacing: 0 !important; text-transform: none !important; }
+.nav { position: relative; height: 36px !important; border-radius: var(--r-ctl) !important; color: var(--text) !important; font-weight: 400 !important; background: transparent !important; box-shadow: none !important; transition: background-color 120ms; }
+.nav:hover { background: rgba(0, 0, 0, .04) !important; }
+:root[data-theme='dark'] .nav:hover { background: rgba(255, 255, 255, .055) !important; }
+.nav.active { background: rgba(0, 0, 0, .055) !important; font-weight: 600 !important; }
+:root[data-theme='dark'] .nav.active { background: rgba(255, 255, 255, .08) !important; }
+.nav.active::before { content: ''; position: absolute; left: 0; top: 50%; width: 3px; height: 16px; margin-top: -8px; border-radius: 3px; background: var(--grad); }
+.nav .ic, .nav.active .ic { color: inherit !important; }
+.nav.active .ic { color: var(--accent-text) !important; }
+.nav-glow { display: none !important; }
+.side-status { border-radius: var(--r-card) !important; background: var(--layer) !important; border: 1px solid var(--line) !important; box-shadow: 0 1px 0 var(--stroke-elev) !important; }
+.side-status:hover { background: var(--sheet) !important; }
+.side-status .dot.good { background: var(--accent) !important; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent) !important; }
+.side-theme.seg { border-radius: var(--r-ctl) !important; }
+
+/* ---------- type: Windows 11 ramp ---------- */
+.page-head h1, .home-head h1 { font-family: var(--font-display) !important; font-weight: 600 !important; letter-spacing: -.01em !important; font-size: 34px !important; line-height: 1.15 !important; }
+.page-head .eyebrow, .home-head .eyebrow { color: var(--accent-text) !important; font-weight: 600 !important; letter-spacing: .02em !important; }
+.page-head p { color: var(--text-2) !important; font-size: 14px !important; }
+.section > h2, .sec-head h2 { font-family: var(--font-display) !important; font-weight: 600 !important; font-size: 20px !important; letter-spacing: 0 !important; }
+.section > .desc { color: var(--text-2) !important; }
+
+/* ---------- settings cards ---------- */
+.card, .jobx, .mjob, .ptile, .plist, .style-card, .local, .longtext, .item { border-radius: var(--r-card) !important; border: 1px solid var(--line) !important; background: var(--sheet) !important; box-shadow: 0 1px 0 var(--stroke-elev) !important; }
+.mjob-now, .job-now { background: var(--surface) !important; border: 1px solid var(--line) !important; border-radius: var(--r-ctl) !important; }
+.row { border-color: var(--line) !important; }
+.row .t { font-weight: 400 !important; font-size: 14px !important; }
+.row .d { color: var(--text-2) !important; }
+.ptile:hover, .card.spot:hover, .item:hover { background: var(--surface) !important; }
+.job-ic, .opt-ic { border-radius: var(--r-ctl) !important; background: color-mix(in srgb, var(--accent) 12%, transparent) !important; color: var(--accent-text) !important; }
+
+/* ---------- controls: Fluent buttons, toggles, inputs ---------- */
+.btn { border-radius: var(--r-ctl) !important; font-weight: 400 !important; height: 32px !important; }
+.btn.sm { height: 28px !important; }
+.btn:not(.primary):not(.ghost):not(.danger):not(.icon):not(.discord) { background: var(--sheet) !important; border: 1px solid var(--line) !important; border-bottom-color: var(--stroke-elev) !important; }
+.btn:not(.primary):not(.ghost):not(.danger):not(.icon):not(.discord):hover { background: var(--surface) !important; }
+.btn.primary { background: var(--accent) !important; border: 1px solid color-mix(in srgb, var(--accent) 80%, #000) !important; border-bottom-width: 2px !important; color: #1f0f00 !important; font-weight: 600 !important; box-shadow: none !important; }
+:root[data-accent='ember'] .btn.primary { background: var(--grad) !important; }
+.btn.primary::after { display: none !important; }
+.btn.primary:hover { filter: brightness(1.06) !important; }
+.switch { border-radius: 999px !important; border: 1px solid var(--text-2) !important; background: transparent !important; }
+.switch::after { background: var(--text-2) !important; box-shadow: none !important; transform-origin: center; }
+.switch[aria-checked='true'] { background: var(--accent) !important; border-color: var(--accent) !important; }
+:root[data-accent='ember'] .switch[aria-checked='true'] { background: var(--grad) !important; }
+.switch[aria-checked='true']::after { background: #fff !important; }
+.seg { border-radius: var(--r-ctl) !important; background: var(--surface-2) !important; border: 1px solid var(--line) !important; }
+.seg-pill { border-radius: 4px !important; background: var(--sheet) !important; box-shadow: 0 1px 2px rgba(0, 0, 0, .14) !important; }
+.input, .select, .textarea, .hk { border-radius: var(--r-ctl) !important; background: var(--sheet) !important; border: 1px solid var(--line) !important; border-bottom: 1px solid var(--text-3) !important; }
+.input:focus, .textarea:focus { border-bottom: 2px solid var(--accent) !important; box-shadow: none !important; outline: none; }
+.kbd { border-radius: 4px !important; background: var(--sheet) !important; border: 1px solid var(--line-strong) !important; box-shadow: 0 1px 0 var(--line-strong) !important; }
+.tab { border-radius: var(--r-ctl) !important; }
+.dd-menu { border-radius: var(--r-card) !important; border: 1px solid var(--line-strong) !important; background: var(--sheet) !important; box-shadow: 0 8px 16px rgba(0, 0, 0, .14) !important; }
+.dd-item { border-radius: 4px !important; }
+.dd-item.hot, .dd-item:hover { background: var(--surface-2) !important; }
+.modal { border-radius: var(--r-card) !important; border: 1px solid var(--line-strong) !important; background: var(--sheet) !important; box-shadow: 0 32px 64px rgba(0, 0, 0, .28) !important; }
+.badge { border-radius: 4px !important; }
+
+/* ---------- Home ---------- */
+.strip .v { font-family: var(--font-display) !important; font-weight: 600 !important; letter-spacing: -.01em !important; }
+.strip .spark i.today { background: var(--grad) !important; }
+.wave i { background: var(--grad) !important; }
+.style-card::before { background: radial-gradient(260px 160px at 100% 0%, color-mix(in srgb, var(--sun) 24%, transparent), transparent 70%) !important; }
+.rec { border-radius: var(--r-ctl) !important; }
+.rec:hover { background: var(--surface) !important; }
+/* Fluent toggle proportions: a 40×20 track with a 12px knob that sits inside it */
+.switch { width: 40px !important; height: 20px !important; box-sizing: border-box !important; }
+.switch::after { top: 3px !important; left: 3px !important; width: 12px !important; height: 12px !important; }
+.switch[aria-checked='true']::after { transform: translateX(20px) !important; }
+.switch:active::after { width: 15px !important; }
+.switch[aria-checked='true']:active::after { transform: translateX(17px) !important; }
+/* History: every entry is its own card, in light and dark alike */
+.hrow { margin-bottom: 6px; border-radius: var(--r-card) !important; background: var(--sheet) !important; box-shadow: 0 0 0 1px var(--line), 0 1px 0 var(--stroke-elev) !important; }
+.hrow:hover, :root[data-theme='light'] .hrow:hover { background: var(--surface) !important; box-shadow: 0 0 0 1px var(--line-strong), 0 1px 0 var(--stroke-elev) !important; }
+/* switches have no ring or glow in any state */
+.switch, .switch:focus, .switch:focus-visible, .switch[aria-checked='true'] { box-shadow: none !important; outline: none !important; }
+.switch:hover::after { box-shadow: none !important; }

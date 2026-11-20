@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Murmint Setup</title>
+<style>
+  /* base.css */
+  .points { margin: 22px 0 0; padding: 0; list-style: none; }
+  .points li { display: flex; gap: 12px; align-items: center; padding: 12px 14px; }
+  .points li + li { border-top: 1px solid var(--line); }
+  .points li b { display: block; font-weight: 600; font-size: 13.5px; }
+  .points li span { color: var(--dim); font-size: 12.5px; }
+  .points .pi { flex: none; width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; background: var(--orange-soft); }
+  .points svg { width: 17px; height: 17px; stroke: var(--orange); stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .field { margin-top: 22px; }
+  .field label { display: block; font-size: 12px; font-weight: 600; color: var(--dim); margin-bottom: 7px; }
+  .path { display: flex; gap: 8px; }
+  .path div { flex: 1; min-width: 0; height: 42px; display: flex; align-items: center; padding: 0 14px; border-radius: 999px; background: var(--card); box-shadow: 0 0 0 1px var(--line); font-size: 12.5px; color: var(--body); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .path .btn { height: 42px; padding: 0 16px; }
+  .demo { margin-top: 20px; min-height: 200px; position: relative; }
+  .demo .stage-col { position: absolute; inset: 0; display: flex; flex-direction: column; opacity: 0; transform: translateY(8px); transition: opacity .5s var(--ease), transform .5s var(--ease); pointer-events: none; }
+  .demo .stage-col.on { opacity: 1; transform: none; }
+  .said { align-self: flex-start; display: inline-flex; align-items: flex-start; gap: 10px; max-width: 96%; margin-bottom: 10px; padding: 9px 14px; border-radius: 16px 16px 16px 5px; background: var(--card); box-shadow: 0 0 0 1px var(--line); color: var(--body); font-size: 13px; font-style: italic; }
+  .said-dots { flex: none; display: inline-flex; gap: 3px; margin-top: 7px; } .said-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--orange); }
+  .said .pause { display: inline-block; margin: 0 5px; padding: 0 8px; border-radius: 999px; background: var(--soft); color: var(--dim); font-size: 11px; font-style: normal; }
+  .window { width: 100%; border-radius: 14px; background: var(--card); box-shadow: 0 0 0 1px var(--line), 0 14px 34px -14px rgba(0, 0, 0, .25); overflow: hidden; align-self: flex-end; }
+  .win-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+  .win-bar b { font-weight: 650; } .win-bar .dim { color: var(--dim); }
+  .win-dots { margin-left: auto; display: flex; gap: 5px; } .win-dots i { width: 8px; height: 8px; border-radius: 50%; background: #3d3732; }
+  .win-body { padding: 13px 15px 15px; font-size: 14px; line-height: 1.6; color: var(--text); }
+  .cut { text-decoration: line-through; text-decoration-color: var(--orange); text-decoration-thickness: 2px; color: var(--dim); background: var(--orange-soft); border-radius: 5px; padding: 0 3px; }
+  .add { background: var(--orange-soft); border-radius: 5px; padding: 0 3px; color: var(--text); }
+  .ico { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; background: #fff; box-shadow: inset 0 0 0 1px var(--line); flex: none; overflow: hidden; }
+  .ico img { width: 14px; height: 14px; object-fit: contain; }
+  .ico.dk { background: #2a2a2e; }
+  .kbd { display: inline-grid; place-items: center; min-width: 30px; height: 26px; padding: 0 8px; border-radius: 7px; background: var(--card); box-shadow: inset 0 -2px 0 rgba(0, 0, 0, .1), inset 0 0 0 1px var(--line-2); font-size: 12px; font-weight: 650; }
+  .howto { margin-top: 18px; padding: 14px 16px; color: var(--body); }
+  .strip-row { display: flex; gap: 8px; width: max-content; animation: slide 40s linear infinite; padding: 0 8px; }
+  @keyframes slide { to { transform: translateX(-50%); } }
+  .app-chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 12px 4px 5px; border-radius: 999px; background: var(--soft); font-size: 12px; font-weight: 550; white-space: nowrap; }
+</style></head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand"><img src="assets/logo.svg" alt="">Murmint</div>
+    <ol class="steps" id="steps"><li class="now"><b>01</b><span>Welcome</span></li><li><b>02</b><span>Options</span></li><li><b>03</b><span>Install</span></li><li><b>04</b><span>Done</span></li></ol>
+    <div class="bar">
+      <button class="min" data-act="min" aria-label="Minimise"><svg viewBox="0 0 16 16"><path d="M3.5 8h9"/></svg></button>
+      <button class="x" data-act="close" aria-label="Close"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+  </header>
+
+  <div class="main">
+    <section class="col">
+      <div class="page on" id="p-welcome">
+        <span class="tag">Version 5.2</span>
+        <h2>Talk. It types.</h2>
+        <p class="lead">Hold a shortcut, speak, and clean, formatted text appears where your cursor is.</p>
+        <ul class="points card">
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></span><div><b>Murmint 1 built in</b><span>Free speech to text that runs on your PC.</span></div></li>
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg></span><div><b>Formats for every app</b><span>Emails, chats, lists and prompts for AI.</span></div></li>
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4-3 7.5-7 9-4-1.5-7-5-7-9V6z"/></svg></span><div><b>Private</b><span>Keys stay on your PC. Audio is never stored.</span></div></li>
+        </ul>
+        <div class="grow"></div>
+        <div class="foot"><span class="note">Installs for your account. No administrator rights needed.</span><button class="btn primary" data-act="next">Get started</button></div>
+      </div>
+
+      <div class="page" id="p-options">
+        <span class="tag">Step 2 of 4</span>
+        <h2>Where should it go?</h2>
+        <p class="lead">The defaults suit most people.</p>
+        <div class="field"><label>Install location</label><div class="path"><div id="dir"></div><button class="btn ghost" data-act="browse">Change</button></div></div>
+        <div class="opt" role="switch" aria-checked="true" id="o-desktop"><div><b>Desktop shortcut</b><span>An icon on your desktop</span></div><i class="sw"></i></div>
+        <div class="opt" role="switch" aria-checked="true" id="o-launch"><div><b>Open Murmint when done</b><span>It waits in your system tray</span></div><i class="sw"></i></div>
+        <div class="grow"></div>
+        <div class="foot"><span class="note">By installing you accept the Murmint terms of service.</span><button class="btn ghost" data-act="back">Back</button><button class="btn primary" data-act="install">Install</button></div>
+      </div>
+
+      <div class="page" id="p-installing">
+        <span class="tag">Step 3 of 4</span>
+        <h2>Installing</h2>
+        <p class="lead">A few seconds. Here's what it does while you wait.</p>
+        <div class="progress"><i id="bar"></i></div>
+        <div class="pct"><span id="status">Preparing</span><span id="pct">0%</span></div>
+        <div class="demo" id="demo"></div>
+        <div class="err" id="err"></div>
+        <div class="grow"></div>
+      </div>
+
+      <div class="page" id="p-done">
+        <div class="tick"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+        <h2>You're all set</h2>
+        <p class="lead">When Murmint opens, sign in with Discord. It downloads Murmint 1 and lets you pick your shortcuts.</p>
+        <div class="howto card">Then add an AI provider in <b>Models</b> and Murmint formats everything you say.</div>
+        <div class="grow"></div>
+        <div class="foot"><span class="note"></span><button class="btn primary" data-act="finish" id="finish">Open Murmint</button></div>
+      </div>
+    </section>
+
+    <section class="cover">
+      <h1>Your voice,<br><span>perfectly typed.</span></h1>
+      <p class="sub">Murmint 1 turns your voice into text on your PC, free. Your AI provider polishes it for any app.</p>
+      <div class="frame"><div class="frame-bar"><i></i><i></i><i></i><b></b></div>
+        <img class="shot on" src="assets/dashboard.webp" alt="Home"><img class="shot" src="assets/models.webp" alt="Models"><img class="shot" src="assets/history.webp" alt="History"><img class="shot" src="assets/styles.webp" alt="Writing"><img class="shot" src="assets/apps.webp" alt="Apps"><img class="shot" src="assets/vocabulary.webp" alt="Vocabulary"><img class="shot" src="assets/settings.webp" alt="Settings">
+      </div>
+      <div class="dock" id="dock"><div class="dock-in"><div class="strip-row" id="strip"></div></div></div>
+    </section>
+  </div>
+</div>
+<script>
+  const ASSET = {};
+  const send = (m) => window.ipc.postMessage(typeof m === 'string' ? m : JSON.stringify(m));
+  const $ = (id) => document.getElementById(id);
+  const pages = ['welcome', 'options', 'installing', 'done'];
+  let page = 0;
+  const show = (i) => {
+    page = i;
+    pages.forEach((p, k) => $('p-' + p).classList.toggle('on', k === i));
+    document.querySelectorAll('#steps li').forEach((d, k) => { d.classList.toggle('done', k < i); d.classList.toggle('now', k === i); });
+  };
+
+  let demoAt = -1, tipTimer;
+  const APPS = {
+    discord: ['discord.svg', 'Discord'], slack: ['slack.svg', 'Slack'], teams: ['teams.svg', 'Teams'], whatsapp: ['whatsapp.svg', 'WhatsApp'],
+    outlook: ['outlook.svg', 'Outlook'], word: ['word.svg', 'Word'], notion: ['notion.svg', 'Notion'], vscode: ['vscode.svg', 'VS Code'],
+    cursor: ['cursor.svg', 'Cursor'], claude: ['claude.svg', 'Claude'], chrome: ['chrome.svg', 'Chrome'], figma: ['figma.svg', 'Figma'],
+    github: ['github.svg', 'GitHub Desktop'], terminal: ['terminal.svg', 'Windows Terminal'], jetbrains: ['jetbrains.svg', 'JetBrains'],
+    visualstudio: ['visualstudio.svg', 'Visual Studio'], notepad: ['notepad.svg', 'Notepad'],
+  };
+  const LIGHT_LOGOS = new Set(['jetbrains', 'terminal']);
+  const tile = (id) => '<i class="ico' + (LIGHT_LOGOS.has(id) ? ' dk' : '') + '"><img src="' + ASSET[APPS[id][0]] + '" alt=""></i>';
+
+  const win = (id, where, body) => '<div class="window"><div class="win-bar">' + tile(id) + '<b>' + APPS[id][1] + '</b><span class="dim">' + where + '</span><span class="win-dots"><i></i><i></i><i></i></span></div><div class="win-body">' + body + '</div></div>';
+  const said = (t) => '<div class="said"><span class="said-dots"><i></i><i></i><i></i></span><span>' + t + '</span></div>';
+
+  const DEMOS = {
+    discord: ['um what’s the plan for the the launch uh like just to confirm', '#launch', '<span class="cut">Um,</span> what’s the plan for <span class="cut">the the</span> launch, <span class="cut">uh, like,</span> just to confirm?'],
+    slack: ['let’s meet at 8:30 no wait 9 instead', '#team', 'Let’s meet at <span class="cut">8:30, no wait,</span> 9.'],
+    teams: ['can you move the call to three no wait four', 'Chat', 'Can you move the call to <span class="cut">3, no wait,</span> 4?'],
+    whatsapp: ['I will be there in five minutes', 'Chat', 'I’ll be there in 5 minutes.'],
+    notion: ['I went to the store <span class="pause">short pause</span> I bought some milk', 'Journal', 'I went to the store<span class="add">,</span> I bought some milk.'],
+    outlook: ['hey maria thanks for the proposal can you send the timeline by friday', 'New message', '<span class="add">Hi</span> Maria<span class="add">,</span><br>Thanks for the proposal<span class="add">.</span> Can you send the timeline by Friday<span class="add">?</span>'],
+    word: ['the quarterly results were ahead of plan across every region', 'Document', 'The quarterly results were ahead of plan across every region<span class="add">.</span>'],
+    vscode: ['call it fetch user profile in camel case', 'index.js', 'fetchUserProfile'],
+    cursor: ['call it fetch user profile in camel case', 'index.js', 'fetchUserProfile'],
+    claude: ['write me a short plan for the week', 'New chat', 'Write me a short plan for the week<span class="add">.</span>'],
+    notepad: ['list these items milk eggs bread and coffee', 'Untitled', '- Milk<br>- Eggs<br>- Bread<br>- Coffee'],
+  };
+  const DEMO_ORDER = ['discord', 'slack', 'teams', 'whatsapp', 'notion', 'outlook', 'word', 'vscode', 'cursor', 'claude', 'notepad'];
+
+  // Only the apps found on this PC are shown: their icons in the dock, and a typing demo for up to four of them.
+  const showApps = (ids) => {
+    const found = Object.keys(APPS).filter((id) => ids.includes(id));
+    const have = found.length ? found : ['notepad'];
+    let row = [];
+    while (row.length < 10) row = row.concat(have);
+    $('strip').innerHTML = [...row, ...row].map((id) => '<span class="app-chip">' + tile(id) + APPS[id][1] + '</span>').join('');
+    $('dock').classList.add('on');
+    const demos = [];
+    for (const id of DEMO_ORDER) {
+      if (!have.includes(id) || demos.length === 4) continue;
+      if (id === 'cursor' && demos.some(([k]) => k === 'vscode')) continue;
+      demos.push([id, DEMOS[id]]);
+    }
+    $('demo').innerHTML = demos.map(([id, [text, where, out]]) => '<div class="stage-col">' + said(text) + win(id, where, out) + '</div>').join('');
+    demoAt = -1;
+    if (page === 2) nextTip();
+  };
+  const nextTip = () => { const cols = [...document.querySelectorAll('#demo .stage-col')]; cols.forEach((c) => c.classList.remove('on')); demoAt = (demoAt + 1) % cols.length; cols[demoAt].classList.add('on'); };
+
+  document.querySelectorAll('.opt').forEach((o) => o.addEventListener('click', () => o.setAttribute('aria-checked', String(o.getAttribute('aria-checked') !== 'true'))));
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    const a = b.dataset.act;
+    if (a === 'next') show(1);
+    else if (a === 'back') show(0);
+    else if (a === 'install') {
+      show(2); nextTip(); tipTimer = setInterval(nextTip, 4800);
+      send({ cmd: 'install', dir: $('dir').textContent, desktop: $('o-desktop').getAttribute('aria-checked') === 'true' });
+    } else if (a === 'finish') send({ cmd: 'finish', launch: $('o-launch').getAttribute('aria-checked') === 'true' });
+    else send({ cmd: a });
+  });
+  document.addEventListener('mousedown', (e) => { if (e.button === 0 && !e.target.closest('button, .opt, .path')) send({ cmd: 'drag' }); });
+
+  window.setup = {
+    dir(d) { $('dir').textContent = d; },
+    apps(ids) { showApps(ids); },
+    progress(p, status) { $('bar').style.width = p + '%'; document.querySelector('#steps li.now') && (document.querySelector('#steps li.now').style.setProperty('--fill', p / 100)); $('pct').textContent = Math.round(p) + '%'; if (status) $('status').textContent = status; },
+    done() { clearInterval(tipTimer); window.setup.progress(100, 'Done'); setTimeout(() => { show(3); if ($('o-launch').getAttribute('aria-checked') !== 'true') $('finish').textContent = 'Close'; }, 450); },
+    failed(msg) { clearInterval(tipTimer); const e = $('err'); e.style.display = 'block'; e.textContent = msg; $('status').textContent = 'Stopped'; },
+  };
+  { // the app tour: the screenshots take turns, and the caption in the frame names the page
+    const shots = [...document.querySelectorAll('.shot')], cap = document.querySelector('.frame-bar b'); let at = 0;
+    const go = (k) => { shots[at].classList.remove('on'); at = k; shots[at].classList.add('on'); cap.textContent = shots[at].alt; };
+    cap.textContent = shots[0].alt; setInterval(() => go((at + 1) % shots.length), 3200);
+  }
+  send({ cmd: 'ready' });
+</script>
+</body></html>

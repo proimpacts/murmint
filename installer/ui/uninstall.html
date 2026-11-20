@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Uninstall Murmint</title>
+<style>
+  /* base.css */
+  .goes { margin: 16px 0 0; padding: 0; list-style: none; }
+  .goes li { display: flex; gap: 12px; align-items: center; padding: 9px 14px; }
+  .goes li + li { border-top: 1px solid var(--line); }
+  .goes li b { display: block; font-weight: 600; font-size: 13.5px; }
+  .goes li span { color: var(--dim); font-size: 12.5px; }
+  .goes .pi { flex: none; width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; background: var(--orange-soft); }
+  .goes svg { width: 17px; height: 17px; stroke: var(--orange); stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .gone { width: 56px; height: 56px; border-radius: 18px; display: grid; place-items: center; margin-top: 14px; background: var(--orange-soft); }
+  .gone svg { width: 26px; height: 26px; stroke: var(--orange); stroke-width: 2.2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+</style></head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand"><img src="assets/logo.svg" alt="">Murmint</div>
+    <ol class="steps" id="steps"><li class="now"><b>01</b><span>Confirm</span></li><li><b>02</b><span>Remove</span></li><li><b>03</b><span>Done</span></li></ol>
+    <div class="bar">
+      <button class="min" data-act="min" aria-label="Minimise"><svg viewBox="0 0 16 16"><path d="M3.5 8h9"/></svg></button>
+      <button class="x" data-act="close" aria-label="Close"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+  </header>
+
+  <div class="main">
+    <section class="col">
+      <div class="page on" id="p-confirm">
+        <span class="tag">Uninstall</span>
+        <h2>Remove Murmint?</h2>
+        <p class="lead">Here is what leaves this PC.</p>
+        <ul class="goes card">
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6.5 7l1 13h9l1-13"/></svg></span><div><b>The app and its shortcuts</b><span>Start menu, desktop and system tray</span></div></li>
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></span><div><b>Murmint 1</b><span>The speech model you downloaded</span></div></li>
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M14 4h5v16h-5M10 8l-4 4 4 4M6 12h9"/></svg></span><div><b>Your sign-in</b><span>You will sign in with Discord again</span></div></li>
+        </ul>
+        <div class="opt" role="switch" aria-checked="false" id="o-wipe"><div><b>Also delete my data</b><span>Settings, history, vocabulary and saved API keys</span></div><i class="sw"></i></div>
+        <div class="grow"></div>
+        <div class="foot"><span class="note"></span><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" data-act="uninstall">Uninstall</button></div>
+      </div>
+
+      <div class="page" id="p-removing">
+        <span class="tag">Uninstall</span>
+        <h2>Uninstalling</h2>
+        <p class="lead">This only takes a moment.</p>
+        <div class="progress"><i id="bar"></i></div>
+        <div class="pct"><span id="status">Preparing</span><span id="pct">0%</span></div>
+        <div class="err" id="err"></div>
+        <div class="grow"></div>
+      </div>
+
+      <div class="page" id="p-done">
+        <div class="gone"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+        <h2>Murmint is removed</h2>
+        <p class="lead">Thanks for giving it a try.</p>
+        <div class="grow"></div>
+        <div class="foot"><span class="note"></span><button class="btn primary" data-act="close">Close</button></div>
+      </div>
+    </section>
+
+    <section class="cover">
+      <h1>Thanks for<br><span>trying Murmint.</span></h1>
+      <p class="sub">Keep your settings and you can pick up where you left off. You will just sign in again.</p>
+      <div class="frame"><div class="frame-bar"><i></i><i></i><i></i><b></b></div>
+        <img class="shot on" src="assets/dashboard.webp" alt="Home"><img class="shot" src="assets/models.webp" alt="Models"><img class="shot" src="assets/history.webp" alt="History">
+      </div>
+      <div class="note-card"><b>Come back any time</b>Your downloads are gone, but a reinstall is a few clicks.</div>
+    </section>
+  </div>
+</div>
+<script>
+  const send = (m) => window.ipc.postMessage(JSON.stringify(m));
+  const $ = (id) => document.getElementById(id);
+  const pages = ['confirm', 'removing', 'done'];
+  let busy = false;
+  const show = (i) => {
+    pages.forEach((p, k) => $('p-' + p).classList.toggle('on', k === i));
+    document.querySelectorAll('#steps li').forEach((d, k) => { d.classList.toggle('done', k < i); d.classList.toggle('now', k === i); });
+  };
+  document.querySelectorAll('.opt').forEach((o) => o.addEventListener('click', () => o.setAttribute('aria-checked', String(o.getAttribute('aria-checked') !== 'true'))));
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    const a = b.dataset.act;
+    if (a === 'uninstall') {
+      busy = true; show(1);
+      send({ cmd: 'uninstall', wipe: $('o-wipe').getAttribute('aria-checked') === 'true' });
+    } else if (!(busy && a === 'close')) send({ cmd: a });
+  });
+  document.addEventListener('mousedown', (e) => { if (e.button === 0 && !e.target.closest('button, .opt')) send({ cmd: 'drag' }); });
+
+  window.setup = {
+    progress(p, status) { $('bar').style.width = p + '%'; $('pct').textContent = Math.round(p) + '%'; if (status) $('status').textContent = status; },
+    done() { busy = false; window.setup.progress(100, 'Done'); setTimeout(() => show(2), 450); },
+    failed(msg) { busy = false; const e = $('err'); e.style.display = 'block'; e.textContent = msg; $('status').textContent = 'Stopped'; },
+  };
+  { // the app tour: the screenshots take turns, and the caption in the frame names the page
+    const shots = [...document.querySelectorAll('.shot')], cap = document.querySelector('.frame-bar b'); let at = 0;
+    const go = (k) => { shots[at].classList.remove('on'); at = k; shots[at].classList.add('on'); cap.textContent = shots[at].alt; };
+    cap.textContent = shots[0].alt; setInterval(() => go((at + 1) % shots.length), 3200);
+  }
+  send({ cmd: 'ready' });
+</script>
+</body></html>

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-accent="ember">
+<head>
+<meta charset="utf-8">
+<title>Better Clipboard</title>
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="clipboard.css">
+</head>
+<body>
+  <div class="cb" id="cb">
+    <header class="cb-top" id="grip">
+      <div class="cb-tabs" role="tablist">
+        <button role="tab" data-tab="emoji" aria-selected="false" title="Emoji" aria-label="Emoji"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5"/><path d="M7 12.2c.8 1 1.8 1.5 3 1.5s2.2-.5 3-1.5"/><circle class="dot" cx="7.6" cy="8.2" r=".9"/><circle class="dot" cx="12.4" cy="8.2" r=".9"/></svg></button>
+        <button role="tab" data-tab="clips" aria-selected="true" title="Clipboard" aria-label="Clipboard"><svg viewBox="0 0 20 20"><rect x="4.5" y="4" width="11" height="13.5" rx="1.8"/><path d="M7.5 4V3.2c0-.4.3-.7.7-.7h3.6c.4 0 .7.3.7.7V4M7.5 9h5M7.5 12h5"/></svg></button>
+      </div>
+      <button class="cb-x" id="close" aria-label="Close"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </header>
+    <input class="cb-search" id="search" placeholder="Search" autocomplete="off" spellcheck="false">
+    <div class="cb-head" id="foot"></div>
+    <div class="cb-chips" id="chips"></div>
+    <main class="cb-body" id="body"></main>
+  </div>
+  <script src="emoji.js"></script>
+  <script src="clipboard.js"></script>
+</body>
+</html>
