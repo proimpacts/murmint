@@ -2,7 +2,7 @@
 
 <img src="docs/images/banner.webp" alt="Murmint" width="100%">
 
-[Download](https://murmint.app/download) · [Docs](https://modly.mintlify.app) · [Discord](https://discord.gg/MEfdzfyARV)
+[Download](https://murmint.app/download) · [Docs](https://docs.murmint.app) · [Discord](https://discord.gg/MEfdzfyARV)
 
 </div>
 
