@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Murmint Setup</title>
+<style>
+  /* base.css */
+  .tag { align-self: flex-start; margin-bottom: 14px; padding: 4px 12px; border-radius: 999px; background: var(--orange-soft); color: #e2560f; font-size: 12px; font-weight: 700; }
+  .points { margin: 26px 0 0; padding: 0; list-style: none; display: grid; gap: 14px; }
+  .points li { display: flex; gap: 14px; align-items: center; }
+  .points li b { display: block; font-weight: 650; font-size: 14px; }
+  .points li span { color: var(--dim); font-size: 12.5px; }
+  .points .pi { flex: none; width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: var(--card); box-shadow: 0 0 0 1px var(--line), 0 8px 18px -12px rgba(255, 106, 31, .6); }
+  .points svg { width: 18px; height: 18px; stroke: var(--orange); stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .field { margin-top: 24px; }
+  .field label { display: block; font-size: 12.5px; font-weight: 650; color: var(--dim); margin-bottom: 8px; }
+  .path { display: flex; gap: 8px; }
+  .path div { flex: 1; min-width: 0; height: 44px; display: flex; align-items: center; padding: 0 16px; border-radius: 14px; background: var(--card); box-shadow: 0 0 0 1px var(--line); font-size: 13px; color: var(--body); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .path .btn { height: 44px; padding: 0 18px; border-radius: 14px; }
+  .howto { margin-top: 22px; padding: 14px 16px; color: var(--body); max-width: 400px; }
+</style></head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand"><img src="assets/logo.svg" alt="">Murmint</div>
+    <div class="bar">
+      <button class="min" data-act="min" aria-label="Minimise"><svg viewBox="0 0 16 16"><path d="M3.5 8h9"/></svg></button>
+      <button class="x" data-act="close" aria-label="Close"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+  </header>
+
+  <div class="main">
+    <section class="col">
+      <div class="page on" id="p-welcome">
+        <span class="tag">Version 5.0</span>
+        <h2>Talk.<br>It types.</h2>
+        <p class="lead">Hold a shortcut, speak, and clean, formatted text appears where your cursor is.</p>
+        <ul class="points">
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></span><div><b>Murmint 1 built in</b><span>Free speech to text that runs on your PC.</span></div></li>
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg></span><div><b>Formats for every app</b><span>Emails, chats, lists and prompts for AI.</span></div></li>
+          <li><span class="pi"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4-3 7.5-7 9-4-1.5-7-5-7-9V6z"/></svg></span><div><b>Private</b><span>Keys stay on your PC. Audio is never stored.</span></div></li>
+        </ul>
+      </div>
+
+      <div class="page" id="p-options">
+        <h2>Where should<br>it go?</h2>
+        <p class="lead">The defaults suit most people.</p>
+        <div class="field"><label>Install location</label><div class="path"><div id="dir"></div><button class="btn ghost" data-act="browse">Change</button></div></div>
+        <div class="opt" role="switch" aria-checked="true" id="o-desktop"><div><b>Desktop shortcut</b><span>An icon on your desktop</span></div><i class="sw"></i></div>
+        <div class="opt" role="switch" aria-checked="true" id="o-launch"><div><b>Open Murmint when done</b><span>It waits in your system tray</span></div><i class="sw"></i></div>
+      </div>
+
+      <div class="page" id="p-installing">
+        <h2>Installing</h2>
+        <p class="lead">A few seconds. Here's what it does while you wait.</p>
+        <div class="progress"><i id="bar"></i></div>
+        <div class="pct"><span id="status">Preparing</span><span id="pct">0%</span></div>
+        <div class="err" id="err"></div>
+      </div>
+
+      <div class="page" id="p-done">
+        <div class="badge"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+        <h2>You're all set</h2>
+        <p class="lead">When Murmint opens, sign in with Discord. It downloads Murmint 1 and lets you pick your shortcuts.</p>
+        <div class="howto card">Then add an AI provider in <b>Models</b> and Murmint formats everything you say.</div>
+      </div>
+    </section>
+
+    <section class="stage" id="stage"></section>
+  </div>
+
+  <footer class="foot">
+    <ol class="steps" id="steps"><li class="now"></li><li></li><li></li><li></li></ol>
+    <span class="step-name" id="step-name">Welcome</span>
+    <span class="note" id="note"></span>
+    <button class="btn ghost" data-act="back" id="b-back" hidden>Back</button>
+    <button class="btn primary" id="b-go" data-act="next">Get started</button>
+  </footer>
+</div>
+<script>
+  const ASSET = {};
+  const send = (m) => window.ipc.postMessage(typeof m === 'string' ? m : JSON.stringify(m));
+  const $ = (id) => document.getElementById(id);
+  const on = (id) => $(id).getAttribute('aria-checked') === 'true';
+
+  // Each page names its step and sets the buttons in the bottom bar
+  const PAGES = [
+    { id: 'welcome', name: 'Welcome', note: 'Installs for your account. No administrator rights needed.', go: ['next', 'Get started'] },
+    { id: 'options', name: 'Options', note: 'By installing you accept the Murmint terms of service.', go: ['install', 'Install'], back: true },
+    { id: 'installing', name: 'Install', note: '' },
+    { id: 'done', name: 'Done', note: '', go: ['finish', 'Open Murmint'] },
+  ];
+  let page = 0;
+  const show = (i) => {
+    page = i;
+    const p = PAGES[i];
+    PAGES.forEach((q, k) => $('p-' + q.id).classList.toggle('on', k === i));
+    document.querySelectorAll('#steps li').forEach((d, k) => { d.classList.toggle('done', k < i); d.classList.toggle('now', k === i); });
+    $('step-name').textContent = p.name;
+    $('note').textContent = p.note;
+    $('b-back').hidden = !p.back;
+    $('b-go').hidden = !p.go;
+    if (p.go) { $('b-go').dataset.act = p.go[0]; $('b-go').textContent = p.id === 'done' && !on('o-launch') ? 'Close' : p.go[1]; }
+  };
+
+  const APPS = {
+    discord: ['discord.svg', 'Discord'], slack: ['slack.svg', 'Slack'], teams: ['teams.svg', 'Teams'], whatsapp: ['whatsapp.svg', 'WhatsApp'],
+    outlook: ['outlook.svg', 'Outlook'], word: ['word.svg', 'Word'], notion: ['notion.svg', 'Notion'], vscode: ['vscode.svg', 'VS Code'],
+    cursor: ['cursor.svg', 'Cursor'], claude: ['claude.svg', 'Claude'], chrome: ['chrome.svg', 'Chrome'], figma: ['figma.svg', 'Figma'],
+    github: ['github.svg', 'GitHub Desktop'], jetbrains: ['jetbrains.svg', 'JetBrains'],
+    visualstudio: ['visualstudio.svg', 'Visual Studio'], notepad: ['notepad.svg', 'Notepad'],
+  };
+  const LIGHT_LOGOS = new Set(['jetbrains']);
+  const tile = (id) => '<i class="ico' + (LIGHT_LOGOS.has(id) ? ' dk' : '') + '"><img src="' + ASSET[APPS[id][0]] + '" alt=""></i>';
+
+  const DEMOS = {
+    discord: ['um what’s the plan for the the launch uh like just to confirm', '#launch', '<span class="cut">Um,</span> what’s the plan for <span class="cut">the the</span> launch, <span class="cut">uh, like,</span> just to confirm?'],
+    slack: ['let’s meet at 8:30 no wait 9 instead', '#team', 'Let’s meet at <span class="cut">8:30, no wait,</span> 9.'],
+    teams: ['can you move the call to three no wait four', 'Chat', 'Can you move the call to <span class="cut">3, no wait,</span> 4?'],
+    whatsapp: ['I will be there in five minutes', 'Chat', 'I’ll be there in 5 minutes.'],
+    notion: ['I went to the store <span class="pause">short pause</span> I bought some milk', 'Journal', 'I went to the store<span class="add">,</span> I bought some milk.'],
+    outlook: ['hey maria thanks for the proposal can you send the timeline by friday', 'New message', '<span class="add">Hi</span> Maria<span class="add">,</span><br>Thanks for the proposal<span class="add">.</span> Can you send the timeline by Friday<span class="add">?</span>'],
+    word: ['the quarterly results were ahead of plan across every region', 'Document', 'The quarterly results were ahead of plan across every region<span class="add">.</span>'],
+    vscode: ['call it fetch user profile in camel case', 'index.js', 'fetchUserProfile'],
+    cursor: ['call it fetch user profile in camel case', 'index.js', 'fetchUserProfile'],
+    claude: ['write me a short plan for the week', 'New chat', 'Write me a short plan for the week<span class="add">.</span>'],
+    notepad: ['list these items milk eggs bread and coffee', 'Untitled', '- Milk<br>- Eggs<br>- Bread<br>- Coffee'],
+  };
+  const DEMO_ORDER = ['discord', 'slack', 'teams', 'whatsapp', 'notion', 'outlook', 'word', 'vscode', 'cursor', 'claude', 'notepad'];
+
+  // The stage plays what Murmint does in up to four of the apps found on this PC: the pill listens, then the tidy
+  // text lands in the app.
+  const wave = '<span class="wave">' + [0, .15, .3, .45, .6, .45, .3].map((d) => '<i style="animation-delay:' + d + 's"></i>').join('') + '</span>';
+  const scene = (id, [text, where, out]) => '<div class="scene"><div class="pill">' + tile(id) + wave + '</div>'
+    + '<div class="said">“' + text + '”</div>'
+    + '<div class="window"><div class="win-bar">' + tile(id) + '<b>' + APPS[id][1] + '</b><span class="dim">' + where + '</span></div><div class="win-body">' + out + '</div></div></div>';
+  let sceneAt = -1, sceneTimer;
+  const nextScene = () => { const s = [...document.querySelectorAll('.scene')]; if (!s.length) return; s.forEach((c) => c.classList.remove('on')); sceneAt = (sceneAt + 1) % s.length; s[sceneAt].classList.add('on'); };
+  const showApps = (ids) => {
+    const have = ids.filter((id) => DEMOS[id]);
+    const demos = [];
+    for (const id of DEMO_ORDER) {
+      if (!(have.length ? have : ['notepad']).includes(id) || demos.length === 4) continue;
+      if (id === 'cursor' && demos.includes('vscode')) continue;
+      demos.push(id);
+    }
+    $('stage').innerHTML = demos.map((id) => scene(id, DEMOS[id])).join('');
+    sceneAt = -1; nextScene();
+    clearInterval(sceneTimer); sceneTimer = setInterval(nextScene, 4800);
+  };
+
+  document.querySelectorAll('.opt').forEach((o) => o.addEventListener('click', () => o.setAttribute('aria-checked', String(!on(o.id)))));
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    const a = b.dataset.act;
+    if (a === 'next') show(1);
+    else if (a === 'back') show(0);
+    else if (a === 'install') { show(2); send({ cmd: 'install', dir: $('dir').textContent, desktop: on('o-desktop') }); }
+    else if (a === 'finish') send({ cmd: 'finish', launch: on('o-launch') });
+    else send({ cmd: a });
+  });
+  document.addEventListener('mousedown', (e) => { if (e.button === 0 && !e.target.closest('button, .opt, .path')) send({ cmd: 'drag' }); });
+
+  window.setup = {
+    dir(d) { $('dir').textContent = d; },
+    apps(ids) { showApps(ids); },
+    progress(p, status) { $('bar').style.width = p + '%'; $('pct').textContent = Math.round(p) + '%'; if (status) $('status').textContent = status; },
+    done() { window.setup.progress(100, 'Done'); setTimeout(() => show(3), 450); },
+    failed(msg) { const e = $('err'); e.style.display = 'block'; e.textContent = msg; $('status').textContent = 'Stopped'; },
+  };
+  show(0);
+  send({ cmd: 'ready' });
+</script>
+</body></html>

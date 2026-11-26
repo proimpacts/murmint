@@ -1,0 +1,472 @@
+use crate::core::{self, changed, state_for_renderer};
+use crate::hub;
+use crate::insertion;
+use crate::profiles::Context;
+use crate::route;
+use crate::session;
+use crate::store::now_ms;
+use crate::usage::summarize;
+use crate::{formatter, native, presets, vocab};
+use base64::Engine as _;
+use serde_json::{json, Value};
+
+fn b64(v: &Value) -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD.decode(v.as_str().unwrap_or("")).unwrap_or_default()
+}
+
+pub fn clean_token(raw: &str) -> String {
+    let t = crate::re!(r"(?i)^authorization:\s*").replace(raw.trim(), "").to_string();
+    let t = crate::re!(r"(?i)^bearer\s+").replace(&t, "").to_string();
+    let t = t.trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string();
+    t.split_whitespace().collect()
+}
+pub fn parse_account_id(raw: &str) -> String {
+    let s = raw.trim();
+    crate::re!(r"(?i)[0-9a-f]{32}")
+        .find(s)
+        .ok()
+        .flatten()
+        .map(|m| m.as_str().to_lowercase())
+        .unwrap_or_else(|| s.to_string())
+}
+
+fn with_store<T>(f: impl FnOnce(&mut crate::store::Store) -> T) -> T {
+    f(&mut core::get().store.lock().unwrap())
+}
+
+pub async fn ui(ch: &str, a: &[Value]) -> Value {
+    let arg = |i: usize| a.get(i).cloned().unwrap_or(Value::Null);
+    match ch {
+        "state:get" => state_for_renderer(),
+        "config:set" => {
+            let path = arg(0).as_str().unwrap_or("").to_string();
+            with_store(|s| {
+                s.set(&path, arg(1));
+                if path.starts_with("privacy.") {
+                    s.prune_history();
+                }
+            });
+            changed("config");
+            json!(true)
+        }
+        "provider:save" => {
+            let mut p = arg(0);
+            if let Some(acc) = p["accountId"].as_str() {
+                p["accountId"] = json!(parse_account_id(acc));
+            }
+            with_store(|s| {
+                let mut list = s.providers().clone();
+                let id = p["id"].as_str().unwrap_or("").to_string();
+                if let Some(i) = list.iter().position(|x| x["id"] == id) {
+                    let builtin = list[i]["builtin"].clone();
+                    let mut merged = list[i].as_object().cloned().unwrap_or_default();
+                    if let Some(po) = p.as_object() {
+                        for (k, v) in po {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                    merged.insert("builtin".into(), builtin);
+                    list[i] = Value::Object(merged);
+                } else if let Some(ship) = crate::store::defaults()["providers"]
+                    .as_array()
+                    .and_then(|d| d.iter().find(|x| x["id"] == id).cloned())
+                {
+                    list.push(ship);
+                    let gone: Vec<Value> = s.config["removedProviders"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|x| x != &json!(id))
+                        .collect();
+                    s.set("removedProviders", Value::Array(gone));
+                } else {
+                    let mut n = p.as_object().cloned().unwrap_or_default();
+                    if id.is_empty() {
+                        n.insert(
+                            "id".into(),
+                            json!(format!("custom-{}", &uuid::Uuid::new_v4().simple().to_string()[..6])),
+                        );
+                    }
+                    n.insert("type".into(), json!("compatible"));
+                    n.insert("builtin".into(), json!(false));
+                    n.insert("enabled".into(), json!(true));
+                    if n.get("models").is_none() {
+                        n.insert("models".into(), json!([]));
+                    }
+                    list.push(Value::Object(n));
+                }
+                s.replace_section("providers", Value::Array(list));
+            });
+            changed("config");
+            json!(true)
+        }
+        "provider:remove" => {
+            let id = arg(0).as_str().unwrap_or("").to_string();
+            let removed = with_store(|s| {
+                // remember removed built-ins so they don't come back
+                let Some(builtin) = s.provider(&id).map(|p| p["builtin"] == json!(true)) else {
+                    return false;
+                };
+                if builtin {
+                    let mut gone = s.config["removedProviders"].as_array().cloned().unwrap_or_default();
+                    if !gone.contains(&json!(id)) {
+                        gone.push(json!(id));
+                    }
+                    s.set("removedProviders", Value::Array(gone));
+                }
+                let list: Vec<Value> = s.providers().iter().filter(|x| x["id"] != id).cloned().collect();
+                s.replace_section("providers", Value::Array(list));
+                s.set_secret(&id, "");
+                let alive = |r: &str| r.is_empty() || r.split("::").next() != Some(id.as_str());
+                let mut m = s.config["models"].clone();
+                for k in ["stt", "format"] {
+                    if let Some(f) = m[k]["fallbacks"].as_array() {
+                        m[k]["fallbacks"] = Value::Array(
+                            f.iter().filter(|r| alive(r.as_str().unwrap_or(""))).cloned().collect(),
+                        );
+                    }
+                }
+                for (k, f) in [("stt", "primary"), ("format", "primary"), ("format", "complex")] {
+                    if !alive(m[k][f].as_str().unwrap_or("")) {
+                        m[k][f] = json!("");
+                    }
+                }
+                s.set("models", m);
+                true
+            });
+            if removed {
+                changed("config");
+            }
+            json!(removed)
+        }
+        "provider:key" => {
+            let id = arg(0).as_str().unwrap_or("").to_string();
+            let raw = arg(1).as_str().unwrap_or("").to_string();
+            with_store(|s| {
+                let cf = s.provider(&id).is_some_and(|p| p["type"] == "cloudflare");
+                let key = if cf {
+                    clean_token(&raw)
+                } else {
+                    crate::re!(r"(?i)^bearer\s+").replace(raw.trim(), "").to_string()
+                };
+                s.set_secret(&id, &key);
+            });
+            changed("config");
+            json!(true)
+        }
+        "provider:test" => hub::test(arg(0).as_str().unwrap_or("")).await,
+        "provider:presets" => presets::presets(),
+        "provider:models" => provider_models(arg(0).as_str().unwrap_or("")).await,
+        "provider:list" => {
+            let a = arg(0);
+            let s = |k: &str| a[k].as_str().unwrap_or("").to_string();
+            list_models(&s("baseUrl"), &s("key"), s("type") == "anthropic", a["free"] == json!(true)).await
+        }
+        "keys:capture" => {
+            if arg(0) == json!(true) {
+                native::set_combos(&json!({}));
+            } else {
+                core::apply_hotkeys();
+            }
+            json!(true)
+        }
+        "keys:down" => {
+            let r = native::handle("native_down", &json!({ "id": 0 })).await.unwrap_or(json!({}));
+            json!(r["keys"]
+                .as_array()
+                .map(|a| a
+                    .iter()
+                    .filter_map(|c| native::name_of_vk(c.as_i64().unwrap_or(0) as i32))
+                    .collect::<Vec<_>>())
+                .unwrap_or_default())
+        }
+        "history:clear" => {
+            with_store(|s| s.clear_history());
+            changed("history");
+            json!(true)
+        }
+        "history:delete" => {
+            with_store(|s| s.delete_history(arg(0).as_str().unwrap_or("")));
+            changed("history");
+            json!(true)
+        }
+        "clipboard:write" => {
+            let t = arg(0).as_str().unwrap_or("").to_string();
+            tokio::task::spawn_blocking(move || insertion::write_clipboard_text(&t)).await.ok();
+            json!(true)
+        }
+        "overlay:raise" => {
+            crate::native::raise_under_taskbar(arg(0).as_i64().unwrap_or(0) as isize);
+            json!({})
+        }
+        "app:trim" => {
+            let pids: Vec<u32> = arg(0)
+                .as_array()
+                .map(|a| a.iter().filter_map(|p| p.as_u64().map(|n| n as u32)).collect())
+                .unwrap_or_default();
+            // the engine listens for the shortcut, so it stays in memory and answers at once
+            let mut n = 0;
+            for p in pids {
+                n += usize::from(crate::native::trim_working_set(p));
+            }
+            json!({ "trimmed": n })
+        }
+        "app:memory" => {
+            let pids: Vec<u32> = arg(0)
+                .as_array()
+                .map(|a| a.iter().filter_map(|p| p.as_u64().map(|n| n as u32)).collect())
+                .unwrap_or_default();
+            json!({ "engine": crate::native::private_memory_mb(0), "pids": pids.iter().map(|p| crate::native::private_memory_mb(*p)).collect::<Vec<f64>>() })
+        }
+        "usage:summary" => with_store(|s| summarize(&s.usage, now_ms(), 14)),
+        "usage:reset" => {
+            with_store(|s| {
+                s.usage = json!({ "days": {} });
+                s.touch("usage.json");
+            });
+            changed("usage");
+            json!(true)
+        }
+        "router:preview" => with_store(|s| route::preview(s)),
+        "vocab:train" => train_take(&arg(0)).await,
+        "format:try" => {
+            let o = arg(0);
+            let ctx = {
+                let c = core::get().store.lock().unwrap().config.clone();
+                let style = c["styles"]
+                    .as_array()
+                    .and_then(|st| st.iter().find(|s| s["id"] == o["styleId"]).or(st.first()))
+                    .cloned()
+                    .unwrap_or(json!({}));
+                let ctx = Context {
+                    app_name: String::new(),
+                    kind: o["kind"].as_str().unwrap_or("auto").to_string(),
+                    style,
+                    intensity: o["intensity"]
+                        .as_i64()
+                        .unwrap_or_else(|| c["formatting"]["intensity"].as_i64().unwrap_or(2)),
+                    instruction: o["instruction"].as_str().unwrap_or("").to_string(),
+                    forced: false,
+                    profile_id: None,
+                    terminal: false,
+                    before: String::new(),
+                    title: String::new(),
+                };
+                ctx
+            };
+            // with a program given, the context is worked out the way a dictation in that app would be
+            let ctx = match o["process"].as_str() {
+                Some(process) => crate::profiles::resolve_context(
+                    &core::get().store.lock().unwrap().config,
+                    &json!({ "process": process, "title": o["title"].as_str().unwrap_or("") }),
+                ),
+                None => ctx,
+            };
+            let mut ctx = ctx;
+            ctx.before = o["before"].as_str().unwrap_or("").to_string();
+            let out = formatter::format(o["text"].as_str().unwrap_or(""), &ctx, false).await;
+            json!({ "text": out.text, "route": out.route, "reason": out.reason, "cost": out.cost, "ref": out.r })
+        }
+        "session:action" => {
+            session::action(arg(0).as_str().unwrap_or("")).await;
+            Value::Null
+        }
+        "session:undo" => insertion::undo().await,
+        "clipboard:enable" => {
+            crate::clipboard::ON.store(arg(0) == json!(true), std::sync::atomic::Ordering::Relaxed);
+            Value::Null
+        }
+        // a pick from Better Clipboard: back to the window you were in, then type it there
+        "clipboard:paste" => {
+            let (hwnd, text) = (arg(0)["hwnd"].as_i64().unwrap_or(0), arg(0)["text"].as_str().unwrap_or("").to_string());
+            let _ = tokio::task::spawn_blocking(move || crate::clipboard::refocus(hwnd)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            json!(insertion::insert(&text).await.ok)
+        }
+        // a GIF (or any file) from Better Clipboard: on the clipboard as a file, back to the window, then Ctrl+V
+        "clipboard:paste_file" => {
+            let hwnd = arg(0)["hwnd"].as_i64().unwrap_or(0);
+            let path = arg(0)["path"].as_str().unwrap_or("").to_string();
+            let ok = tokio::task::spawn_blocking(move || crate::clipboard::write_files(&[path])).await.unwrap_or(false);
+            let _ = tokio::task::spawn_blocking(move || crate::clipboard::refocus(hwnd)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            if ok {
+                native::handle("native_paste", &json!({})).await;
+            }
+            json!(ok)
+        }
+        // a picture the shell already put on the clipboard: back to the window, then Ctrl+V
+        "clipboard:paste_current" => {
+            let hwnd = arg(0)["hwnd"].as_i64().unwrap_or(0);
+            let _ = tokio::task::spawn_blocking(move || crate::clipboard::refocus(hwnd)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            native::handle("native_paste", &json!({})).await;
+            json!(true)
+        }
+        "session:lock" => {
+            session::LOCKED.store(arg(0) == json!(true), std::sync::atomic::Ordering::Relaxed);
+            Value::Null
+        }
+        "rec:preview" => json!(
+            session::preview(b64(&arg(0)["wav_b64"]), arg(0)["durationSec"].as_f64().unwrap_or(0.0)).await
+        ),
+        "secrets:pending" => with_store(|s| {
+            json!(s
+                .pending_secrets()
+                .into_iter()
+                .map(|(id, v)| json!({ "id": id, "v": v }))
+                .collect::<Vec<_>>())
+        }),
+        "secrets:import" => {
+            with_store(|s| s.set_secret(arg(0).as_str().unwrap_or(""), arg(1).as_str().unwrap_or("")));
+            changed("config");
+            json!(true)
+        }
+        "dev:seed" if std::env::var("MURMINT_DEV").is_ok() => {
+            let o = arg(0);
+            with_store(|s| {
+                if let Some(sec) = o["secret"].as_object() {
+                    let id = sec["id"].as_str().unwrap_or("");
+                    s.set_secret(id, sec["key"].as_str().unwrap_or(""));
+                    if let Some(ps) = s.config["providers"].as_array_mut() {
+                        for p in ps {
+                            if p["id"] == id {
+                                p["accountId"] = sec["accountId"].clone();
+                            }
+                        }
+                    }
+                }
+                for h in o["history"].as_array().cloned().unwrap_or_default() {
+                    s.history.push(h);
+                }
+                s.touch("history.json");
+                if let Some(d) = o["days"].as_object() {
+                    for (k, v) in d {
+                        s.usage["days"][k] = v.clone();
+                    }
+                    s.touch("usage.json");
+                }
+                if !o["personal"].is_null() {
+                    s.set("personal", o["personal"].clone());
+                }
+            });
+            changed("config");
+            json!(true)
+        }
+        _ => json!({ "error": format!("unknown channel {ch}") }),
+    }
+}
+
+pub fn send(ch: &str, a: &[Value]) {
+    let arg = |i: usize| a.get(i).cloned().unwrap_or(Value::Null);
+    match ch {
+        "rec:chunk" => session::on_chunk(b64(&arg(0))),
+        "rec:boundary" => session::on_boundary(arg(0)["final"] == json!(true), arg(0)["gapMs"].as_u64()),
+        "rec:autostop" => session::on_auto_stop(),
+        "rec:segment" => {
+            let s = arg(0);
+            session::on_segment(session::Seg {
+                wav: b64(&s["wav_b64"]),
+                duration_sec: s["durationSec"].as_f64().unwrap_or(0.0),
+                peak: s["peak"].as_f64().unwrap_or(0.0),
+                last: s["final"] == json!(true),
+                gap_ms: s["gapMs"].as_u64(),
+            });
+        }
+        "rec:error" => session::rec_error(arg(0).as_str().unwrap_or("Something went wrong")),
+        _ => {}
+    }
+}
+
+async fn provider_models(id: &str) -> Value {
+    let (p, key) = {
+        let s = core::get().store.lock().unwrap();
+        (s.provider(id).cloned(), s.get_secret(id))
+    };
+    let Some(p) = p else { return json!({ "ok": false, "error": "Add the base URL first" }) };
+    list_models(p["baseUrl"].as_str().unwrap_or(""), &key, p["type"] == "anthropic", p["free"] == json!(true)).await
+}
+
+/// The models a server offers, for a saved service or one still being filled in.
+async fn list_models(base: &str, key: &str, anthropic: bool, free: bool) -> Value {
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return json!({ "ok": false, "error": "Add the base URL first" });
+    }
+    let url = format!("{base}/models{}", if anthropic { "?limit=1000" } else { "" });
+    let mut req = crate::CLIENT.get(url).timeout(std::time::Duration::from_secs(15));
+    if anthropic {
+        req = req.header("x-api-key", key).header("anthropic-version", "2023-06-01");
+    } else if !key.is_empty() {
+        req = req.bearer_auth(key);
+    }
+    match req.send().await {
+        Ok(res) => {
+            let st = res.status().as_u16();
+            if !(200..300).contains(&st) {
+                let error = if st == 401 || st == 403 {
+                    "The provider rejected the key. Save a valid key first.".to_string()
+                } else {
+                    format!("The provider answered {st}")
+                };
+                return json!({ "ok": false, "error": error });
+            }
+            let body: Value = res.json().await.unwrap_or(Value::Null);
+            let local = base.contains("localhost") || base.contains("127.0.0.1");
+            json!({ "ok": true, "models": presets::parse_model_list(&body, local || free) })
+        }
+        Err(e) => {
+            let error = if e.is_connect() {
+                "Could not reach the server. Is it running?".to_string()
+            } else {
+                e.without_url().to_string()
+            };
+            json!({ "ok": false, "error": error })
+        }
+    }
+}
+
+async fn train_take(t: &Value) -> Value {
+    let (wav, dur, term) = (
+        b64(&t["wav_b64"]),
+        t["durationSec"].as_f64().unwrap_or(0.0),
+        t["term"].as_str().unwrap_or("").to_string(),
+    );
+    let (refs, lang) = {
+        let s = core::get().store.lock().unwrap();
+        (route::rank_stt(&s, dur), crate::accent::language(&s.config))
+    };
+    match hub::transcribe(&refs, &wav, dur, if lang == "auto" { None } else { Some(lang.as_str()) }, "").await
+    {
+        Ok(r) => match vocab::clean_heard(&r.text, &term) {
+            None => {
+                json!({ "ok": true, "heard": r.text.trim(), "variant": null, "exact": false, "empty": true })
+            }
+            Some((exact, variant)) => {
+                json!({ "ok": true, "heard": r.text.trim(), "variant": variant, "exact": exact })
+            }
+        },
+        Err(e) => {
+            let error = if e.not_configured {
+                "Add an API key under Models first, so Murmint can listen to your recording.".to_string()
+            } else {
+                e.message
+            };
+            json!({ "ok": false, "error": error })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pasted_tokens_and_account_ids_are_cleaned() {
+        assert_eq!(clean_token("  Authorization: Bearer \"abc def\"  "), "abcdef");
+        assert_eq!(clean_token("bearer xyz"), "xyz");
+        let id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(parse_account_id(&format!("https://dash.cloudflare.com/{id}/ai")), id);
+        assert_eq!(parse_account_id("nope"), "nope");
+    }
+}
