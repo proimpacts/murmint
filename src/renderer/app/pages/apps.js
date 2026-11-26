@@ -35,7 +35,7 @@
   // mirrors is_added in profiles.rs
   const isAdded = (p) => {
     const ov = overrideOf(p.id);
-    return p.custom === true || ov.added === true || !!ov.style || typeof ov.intensity === 'number' || !!ov.instruction;
+    return p.custom === true || ov.added === true || !!ov.style || typeof ov.intensity === 'number' || !!ov.instruction || !!ov.rules?.length;
   };
 
   const fallbackStyle = (cfg, p) => styleName(cfg, p.style || cfg.formatting.style);
@@ -49,6 +49,8 @@
     const bits = [`${ov.style && cfg.styles.some((x) => x.id === ov.style) ? styleName(cfg, ov.style) : fallbackStyle(cfg, p)} style`];
     if (typeof ov.intensity === 'number') bits.push(STRENGTH[ov.intensity + 1].label.toLowerCase());
     if (ov.instruction) bits.push(ov.overrideRules ? 'only your notes' : 'your notes');
+    const rules = (ov.rules || []).filter((r) => r.enabled !== false && r.text?.trim()).length;
+    if (rules) bits.push(rules === 1 ? '1 rule' : `${rules} rules`);
     return bits.join(', ');
   }
 
@@ -78,7 +80,9 @@
       h('div', { class: 'd' }, 'Notes for this app. Murmint is told these every time it writes here. Leave empty to keep the built-in note.'),
       UI.textarea({ value: ov.instruction || '', placeholder: p.instruction || 'e.g. Keep it short. No sign-off.', rows: 3,
         onInput: (v) => saveNotes(v) }),
-      UI.row('Only use these notes', 'Turn on to leave out your rules from Writing in this app, so only the notes above apply.',
+      h('div', { class: 'd' }, 'Rules for this app. They are followed here on top of your rules from Writing.'),
+      window.ruleEditor(`app-${p.id}`, () => overrideOf(p.id).rules || [], (list, render) => setOverride(p.id, 'rules', list, render)),
+      UI.row('Only use these notes and rules', 'Turn on to leave out your rules from Writing in this app, so only the notes and rules above apply.',
         UI.toggle(ov.overrideRules === true, (v) => setOverride(p.id, 'overrideRules', v), `${p.name} notes only`)),
       h('div', { class: 'd' }, `Matches: ${programs}`),
       h('div', { class: 'flex' },

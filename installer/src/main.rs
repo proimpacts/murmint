@@ -48,6 +48,14 @@ fn dir_size(p: &Path) -> u64 {
 }
 
 fn main() {
+    // an update started by Murmint: install over it with no window, keeping the desktop shortcut, then start it again
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--update") {
+        let dir = args.iter().find_map(|a| a.strip_prefix("--dir=")).map(String::from).unwrap_or_else(default_dir);
+        let _ = install(&dir, true, None);
+        let _ = Command::new(Path::new(&dir).join("Murmint.exe")).current_dir(&dir).spawn();
+        return;
+    }
     let mut ctx = WebContext::new(Some(std::env::temp_dir().join("murmint-setup-webview")));
     let Shell { event_loop, proxy, window, webview } = shell::open("Murmint Setup", HTML, &mut ctx);
     let webview = match webview {
@@ -114,7 +122,7 @@ fn main() {
                             proxy.clone(),
                         );
                         std::thread::spawn(move || {
-                            let ok = install(&target, desktop, &p);
+                            let ok = install(&target, desktop, Some(&p));
                             let _ = p.send_event(Ev::Js(if ok.is_ok() {
                                 "setup.done()".into()
                             } else {
@@ -192,13 +200,15 @@ fn ok_flag() -> bool {
 fn install(
     dir: &str,
     desktop: bool,
-    p: &tao::event_loop::EventLoopProxy<Ev>,
+    p: Option<&tao::event_loop::EventLoopProxy<Ev>>,
 ) -> Result<(), String> {
     let say = |pct: f64, status: &str| {
-        let _ = p.send_event(Ev::Js(format!(
-            "setup.progress({pct:.1},{})",
-            js_str(status)
-        )));
+        if let Some(p) = p {
+            let _ = p.send_event(Ev::Js(format!(
+                "setup.progress({pct:.1},{})",
+                js_str(status)
+            )));
+        }
     };
     say(2.0, "Preparing");
     for exe in ["Murmint.exe", "murmint-engine.exe"] {
@@ -207,6 +217,19 @@ fn install(
             .creation_flags(NO_WINDOW)
             .status();
     }
+    // taskkill returns before the processes are gone; the setup skips copying while Murmint is still running
+    let running = || {
+        Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq Murmint.exe", "/NH"])
+            .creation_flags(NO_WINDOW)
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Murmint.exe"))
+    };
+    let start = Instant::now();
+    while running() && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_millis(500));
     let setup = payload_path().map_err(|e| format!("Could not unpack the installer: {e}"))?;
     say(6.0, "Copying files");
     let mut child = Command::new(&setup)

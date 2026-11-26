@@ -44,7 +44,7 @@ function close() {
   win = null;
 }
 
-async function show({ target, card, regions }) {
+async function show({ target, card, regions, anchor }) {
   close();
   const cursor = screen.getCursorScreenPoint();
   const blocks = (regions || []).map((r) => {
@@ -57,9 +57,11 @@ async function show({ target, card, regions }) {
     return { text: r.translation, original: r.text, x: x - 2, y: y - pad, w: w + 4, h: h + pad * 2, line };
   });
   const placed = blocks.filter((b) => b.w);
+  // a card goes by the box the text was copied from (the mouse is only the last resort)
+  const box = anchor ? toDip(anchor) : null;
   const display = placed.length
     ? screen.getDisplayMatching({ x: placed[0].x, y: placed[0].y, width: placed[0].w, height: placed[0].h })
-    : screen.getDisplayNearestPoint(cursor);
+    : box ? screen.getDisplayMatching({ x: box[0], y: box[1], width: box[2], height: box[3] }) : screen.getDisplayNearestPoint(cursor);
   const { bounds, scaleFactor } = display;
   if (placed.length) {
     try {
@@ -83,6 +85,7 @@ async function show({ target, card, regions }) {
     win.webContents.send('translate:blocks', {
       target, card: !!card || !placed.length, blocks,
       cursor: { x: cursor.x - bounds.x, y: cursor.y - bounds.y },
+      anchor: box ? { x: box[0] - bounds.x, y: box[1] - bounds.y, w: box[2], h: box[3] } : null,
     });
     win.show(); win.focus();
   });

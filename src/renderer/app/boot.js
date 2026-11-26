@@ -24,10 +24,10 @@
   const showUpdate = (u) => {
     if (!u || document.getElementById('update-bar')) return;
     const bar = document.createElement('div'); bar.id = 'update-bar'; bar.className = 'update-bar';
-    const label = document.createElement('span'); label.textContent = 'Murmint ' + u.version + ' is available.';
-    const go = document.createElement('button'); go.className = 'btn primary sm'; go.textContent = 'Install update';
+    const label = document.createElement('span'); label.textContent = 'Murmint ' + u.version + ' is available. Would you like to install?';
+    const go = document.createElement('button'); go.className = 'btn primary sm'; go.textContent = 'Install';
     const later = document.createElement('button'); later.className = 'btn ghost sm'; later.textContent = 'Later';
-    go.onclick = async () => { go.disabled = true; go.textContent = 'Downloading…'; const r = await api.installUpdate(); if (!r || !r.ok) { go.disabled = false; go.textContent = 'Install update'; UI.toast((r && r.message) || 'Could not install the update', 'error'); } };
+    go.onclick = async () => { go.disabled = true; go.textContent = 'Updating…'; const r = await api.installUpdate(); if (!r || !r.ok) { go.disabled = false; go.textContent = 'Install'; UI.toast((r && r.message) || 'Could not install the update', 'error'); } };
     later.onclick = () => bar.remove();
     bar.append(label, go, later); document.body.append(bar);
   };

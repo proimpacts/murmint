@@ -83,6 +83,7 @@ fn is_added(profile: &Value, ov: &Value) -> bool {
         || ov["style"].as_str().is_some_and(|s| !s.is_empty())
         || ov["intensity"].is_number()
         || ov["instruction"].as_str().is_some_and(|s| !s.is_empty())
+        || ov["rules"].as_array().is_some_and(|r| !r.is_empty())
 }
 
 pub fn resolve_context(cfg: &Value, app: &Value) -> Context {

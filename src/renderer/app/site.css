@@ -400,3 +400,4 @@ input:focus, input:focus-visible, textarea:focus, textarea:focus-visible, [conte
 .preset:has(+ .preset-edit) { border-bottom: 0; }
 .preset-edit { border-bottom: 0; padding-bottom: 6px; }
 .svc-body > .preset:last-child, .svc-body > .preset-edit:last-child { border-bottom: 0; }
+.swatch { background-origin: border-box; }
