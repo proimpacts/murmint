@@ -1,0 +1,66 @@
+{
+  "name": "murmint",
+  "productName": "Murmint",
+  "version": "0.5.0",
+  "description": "AI voice typing for Windows. Speak naturally, get clean, formatted text in any app.",
+  "main": "src/main/main.js",
+  "author": "Murmint",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/recorder.test.js && cargo test --manifest-path engine/Cargo.toml",
+    "icons": "node scripts/make-icons.js",
+    "e2e": "node scripts/e2e.js",
+    "dist": "npm run engine && electron-builder --win && node scripts/build-installer.js",
+    "engine": "node scripts/build-engine.js",
+    "e2e:live": "node scripts/e2e-live.js",
+    "e2e:vocab": "node scripts/e2e-vocab.js",
+    "installerart": "electron scripts/make-installer-art.js"
+  },
+  "devDependencies": {
+    "@fontsource-variable/inter": "^5.2.5",
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "dev.murmint.app",
+    "productName": "Murmint",
+    "files": [
+      "src/**/*",
+      "build/**/*",
+      "package.json",
+      "!src/main/local/**"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerSidebar": "installerSidebar.bmp",
+      "uninstallerSidebar": "uninstallerSidebar.bmp",
+      "installerHeader": "installerHeader.bmp",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Murmint",
+      "runAfterFinish": true,
+      "uninstallDisplayName": "Murmint",
+      "include": "build/installer.nsh",
+      "artifactName": "${productName}-core-${version}.${ext}"
+    },
+    "extraResources": [
+      {
+        "from": "bin/murmint-engine.exe",
+        "to": "bin/murmint-engine.exe"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/proimpacts/murmint.git"
+  },
+  "license": "GPL-3.0-only"
+}

@@ -1,0 +1,9 @@
+html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; }
+#layer { position: absolute; inset: 0; }
+.tb { position: absolute; box-sizing: border-box; padding: 0 2px; margin: 0; display: flex; align-items: center; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.22; cursor: default; user-select: text; border-radius: 3px; animation: tb-in .16s ease-out; transition: opacity .12s; }
+.tb.grown { box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+.tb.peek { opacity: 0; }
+.card { position: absolute; box-sizing: border-box; width: min(420px, 90vw); max-height: 60vh; overflow-y: auto; padding: 14px 16px; border-radius: 12px; background: var(--surface-1, #1c1c1f); color: var(--text-1, #f2f2f2); font-size: 14px; line-height: 1.5; white-space: pre-wrap; user-select: text; box-shadow: 0 12px 32px rgba(0,0,0,.35); animation: tb-in .16s ease-out; }
+.chip { position: absolute; padding: 4px 10px; border-radius: 999px; background: rgba(20,20,22,.86); color: #f4f4f4; font-size: 11.5px; pointer-events: none; animation: tb-in .16s ease-out; }
+@keyframes tb-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .tb, .card, .chip { animation: none; } }

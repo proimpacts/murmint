@@ -1,0 +1,176 @@
+[
+ {
+  "key": "openrouter",
+  "name": "OpenRouter",
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "keyLabel": "OpenRouter API key",
+  "docs": "https://openrouter.ai/keys",
+  "note": "One key for hundreds of models from many companies. Import the list and keep the cheap ones."
+ },
+ {
+  "key": "groq",
+  "name": "Groq",
+  "baseUrl": "https://api.groq.com/openai/v1",
+  "keyLabel": "Groq API key",
+  "docs": "https://console.groq.com/keys",
+  "note": "Very fast Whisper transcription and open chat models."
+ },
+ {
+  "key": "xai",
+  "name": "xAI (Grok)",
+  "baseUrl": "https://api.x.ai/v1",
+  "keyLabel": "xAI API key",
+  "docs": "https://console.x.ai",
+  "note": "Grok models."
+ },
+ {
+  "key": "mistral",
+  "name": "Mistral AI",
+  "baseUrl": "https://api.mistral.ai/v1",
+  "keyLabel": "Mistral API key",
+  "docs": "https://console.mistral.ai/api-keys",
+  "note": "The French AI company. Small, inexpensive models that suit formatting."
+ },
+ {
+  "key": "together",
+  "name": "Together AI",
+  "baseUrl": "https://api.together.xyz/v1",
+  "keyLabel": "Together API key",
+  "docs": "https://api.together.ai/settings/api-keys",
+  "note": "Open models."
+ },
+ {
+  "key": "fireworks",
+  "name": "Fireworks AI",
+  "baseUrl": "https://api.fireworks.ai/inference/v1",
+  "keyLabel": "Fireworks API key",
+  "docs": "https://fireworks.ai/account/api-keys",
+  "note": "Open models."
+ },
+ {
+  "key": "cerebras",
+  "name": "Cerebras",
+  "baseUrl": "https://api.cerebras.ai/v1",
+  "keyLabel": "Cerebras API key",
+  "docs": "https://cloud.cerebras.ai",
+  "note": "Extremely fast open models."
+ },
+ {
+  "key": "deepseek",
+  "name": "DeepSeek",
+  "baseUrl": "https://api.deepseek.com/v1",
+  "keyLabel": "DeepSeek API key",
+  "docs": "https://platform.deepseek.com/api_keys",
+  "note": "Low-cost chat models."
+ },
+ {
+  "key": "gemini",
+  "name": "Google Gemini",
+  "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+  "keyLabel": "Gemini API key",
+  "docs": "https://aistudio.google.com/apikey",
+  "note": "Google's OpenAI-compatible endpoint. Has a free tier."
+ },
+ {
+  "key": "opencode",
+  "name": "OpenCode Zen",
+  "baseUrl": "https://opencode.ai/zen/v1",
+  "keyLabel": "OpenCode Zen API key",
+  "docs": "https://opencode.ai/auth",
+  "note": "The models behind OpenCode. Some are free: import the list and set those prices to 0."
+ },
+ {
+  "key": "ollama",
+  "name": "Ollama (on this PC)",
+  "baseUrl": "http://localhost:11434/v1",
+  "keyLabel": "No key needed",
+  "keyOptional": true,
+  "local": true,
+  "docs": "https://ollama.com/download",
+  "note": "Runs models on your own computer. Free. Install Ollama, run a model once, then import it here."
+ },
+ {
+  "key": "lmstudio",
+  "name": "LM Studio (on this PC)",
+  "baseUrl": "http://localhost:1234/v1",
+  "keyLabel": "No key needed",
+  "keyOptional": true,
+  "local": true,
+  "docs": "https://lmstudio.ai",
+  "note": "Runs models on your own computer. Free. Start its local server, then import the models here."
+ },
+ {
+  "key": "perplexity",
+  "name": "Perplexity",
+  "baseUrl": "https://api.perplexity.ai",
+  "keyLabel": "Perplexity API key",
+  "docs": "https://www.perplexity.ai/settings/api",
+  "note": "Sonar chat models."
+ },
+ {
+  "key": "huggingface",
+  "name": "Hugging Face",
+  "baseUrl": "https://router.huggingface.co/v1",
+  "keyLabel": "Hugging Face token",
+  "docs": "https://huggingface.co/settings/tokens",
+  "note": "Open models from many hosts through one token."
+ },
+ {
+  "key": "deepinfra",
+  "name": "DeepInfra",
+  "baseUrl": "https://api.deepinfra.com/v1/openai",
+  "keyLabel": "DeepInfra API key",
+  "docs": "https://deepinfra.com/dash/api_keys",
+  "note": "Low-cost open models, and Whisper for speech."
+ },
+ {
+  "key": "sambanova",
+  "name": "SambaNova",
+  "baseUrl": "https://api.sambanova.ai/v1",
+  "keyLabel": "SambaNova API key",
+  "docs": "https://cloud.sambanova.ai/apis",
+  "note": "Very fast open models."
+ },
+ {
+  "key": "zai",
+  "name": "Z.ai (GLM)",
+  "type": "anthropic",
+  "baseUrl": "https://api.z.ai/api/anthropic/v1",
+  "keyLabel": "Z.ai API key",
+  "docs": "https://z.ai/manage-apikey/apikey-list",
+  "note": "GLM models through the Claude API format."
+ },
+ {
+  "key": "moonshot",
+  "name": "Moonshot (Kimi)",
+  "type": "anthropic",
+  "baseUrl": "https://api.moonshot.ai/anthropic/v1",
+  "keyLabel": "Moonshot API key",
+  "docs": "https://platform.moonshot.ai/console/api-keys",
+  "note": "Kimi models through the Claude API format."
+ },
+ {
+  "key": "minimax",
+  "name": "MiniMax",
+  "type": "anthropic",
+  "baseUrl": "https://api.minimax.io/anthropic/v1",
+  "keyLabel": "MiniMax API key",
+  "docs": "https://www.minimax.io/platform/user-center/basic-information/interface-key",
+  "note": "MiniMax models through the Claude API format."
+ },
+ {
+  "key": "custom",
+  "name": "",
+  "baseUrl": "",
+  "keyLabel": "API key",
+  "note": "Any server that speaks the OpenAI chat and transcription API."
+ },
+ {
+  "key": "custom-anthropic",
+  "name": "",
+  "type": "anthropic",
+  "baseUrl": "",
+  "keyLabel": "API key",
+  "note": "Any server that speaks the Claude (Anthropic) messages API. Use the address that ends in /v1."
+ }
+]
