@@ -304,6 +304,27 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
             native::handle("native_paste", &json!({})).await;
             json!(true)
         }
+        "local:status" => crate::murmint1::status(),
+        "local:download" => crate::murmint1::download(),
+        "local:cancel" => {
+            crate::murmint1::cancel();
+            Value::Null
+        }
+        "local:use" => json!({ "ok": crate::murmint1::use_it().await }),
+        "local:start" => json!({ "ok": crate::murmint1::start().await }),
+        "account:get" => crate::account::user(),
+        "account:import" => crate::account::import(&arg(0)),
+        "account:signIn" => crate::account::sign_in().await,
+        "account:cancel" => {
+            crate::account::cancel();
+            Value::Null
+        }
+        "account:signOut" => crate::account::sign_out().await,
+        "account:verify" => crate::account::verify().await,
+        "update:check" => crate::updater::check_now().await,
+        "update:get" => crate::updater::available().unwrap_or(Value::Null),
+        "update:download" => crate::updater::download().await,
+        "site:icon" => crate::site_icons::icon(arg(0).as_str().unwrap_or("")).await,
         "session:lock" => {
             session::LOCKED.store(arg(0) == json!(true), std::sync::atomic::Ordering::Relaxed);
             Value::Null

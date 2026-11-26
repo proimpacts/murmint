@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 mod accent;
+mod account;
 mod agent_chat;
 mod clipboard;
 mod core;
@@ -9,6 +10,7 @@ mod hub;
 mod insertion;
 mod ipc;
 mod learn;
+mod murmint1;
 mod native;
 mod presets;
 mod profiles;
@@ -17,8 +19,10 @@ mod route;
 mod session;
 #[cfg(all(test, local_tests))]
 mod session_tests;
+mod site_icons;
 mod store;
 mod text;
+mod updater;
 mod usage;
 mod vocab;
 mod vocab_ai;
@@ -689,9 +693,16 @@ async fn main() {
                         session::init();
                         native::start_hotkeys(session::on_hotkey_event);
                         clipboard::start(|ch, v| core::push(ch, "shell", v));
-                        native::start_site_watch(|site| {
-                            core::push("site:seen", "shell", serde_json::json!({ "site": site }))
+                        // fetch the icon of each site as it is seen, so it is ready when the pill or History asks
+                        let rt = tokio::runtime::Handle::current();
+                        native::start_site_watch(move |site| {
+                            rt.spawn(async move {
+                                site_icons::icon(&site).await;
+                            });
                         });
+                        tokio::spawn(murmint1::boot());
+                        static UPDATES: std::sync::Once = std::sync::Once::new();
+                        UPDATES.call_once(updater::start);
                         core::apply_hotkeys();
                         *core::get().helper_ready.lock().unwrap() = true;
                         tokio::spawn(async {
@@ -718,6 +729,7 @@ async fn main() {
                         });
                     }
                     _ => {
+                        murmint1::stop();
                         if let Some(c) = core::try_get() {
                             c.store.lock().unwrap().flush();
                         }

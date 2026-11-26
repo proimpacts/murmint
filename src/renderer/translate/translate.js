@@ -1,87 +1,49 @@
 (() => {
   const api = window.murmintIpc;
-  const layer = document.getElementById('layer'), chip = document.getElementById('chip');
+  const layer = document.getElementById('layer');
   const close = () => api.closeTranslation();
+  const make = (tag, cls, text) => { const e = document.createElement(tag); e.className = cls; if (text) e.textContent = text; return e; };
 
-  // Shrinks the type until the translation fits the original's box; if it still doesn't, the box grows downward
-  function fit(el, b) {
-    let size = Math.max(10, Math.min(28, b.line * 0.74));
-    el.style.fontSize = size + 'px';
-    while (el.scrollHeight > b.h + 1 && size > 10) { size -= 0.5; el.style.fontSize = size + 'px'; }
-    if (el.scrollHeight > b.h + 1) { el.style.height = 'auto'; el.classList.add('grown'); }
+  // Puts the bubble under the text (or over it when there's no room below), with its tail pointing at it
+  function place(bubble, tail, at) {
+    const gap = 14, margin = 12, w = bubble.offsetWidth, h = bubble.offsetHeight;
+    const below = at.y + at.h + gap, above = at.y - gap - h;
+    let y, side;
+    if (below + h <= innerHeight - margin) { y = below; side = 'up'; }
+    else if (above >= margin) { y = above; side = 'down'; }
+    else { y = Math.max(margin, Math.min(below, innerHeight - margin - h)); side = ''; }
+    const cx = at.x + at.w / 2;
+    const x = Math.max(margin, Math.min(cx - w / 2, innerWidth - w - margin));
+    bubble.style.left = x + 'px';
+    bubble.style.top = y + 'px';
+    tail.className = 'tail ' + side;
+    tail.hidden = !side;
+    tail.style.left = Math.max(20, Math.min(cx - x, w - 20)) - 9 + 'px';
+    bubble.style.transformOrigin = `${cx - x}px ${side === 'down' ? h : 0}px`;
   }
 
-  function copyButton(text) {
-    const copy = document.createElement('button');
-    copy.type = 'button';
-    copy.className = 'copy';
-    copy.textContent = 'Copy';
-    copy.addEventListener('mousedown', (e) => e.stopPropagation());
+  function show({ target, text, at, theme, accent }) {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.dataset.accent = accent || 'ember';
+    const bubble = make('div', 'bubble'), tail = make('i', 'tail');
+    const copy = make('button', 'btn', 'Copy'), dismiss = make('button', 'btn ghost', 'Dismiss');
+    copy.type = dismiss.type = 'button';
     copy.addEventListener('click', async () => {
-      await api.copyText(text);
-      copy.textContent = 'Copied';
-      copy.classList.add('done');
-      setTimeout(() => { copy.textContent = 'Copy'; copy.classList.remove('done'); }, 1400);
+      try { await api.copyText(text); copy.textContent = 'Copied'; } catch { copy.textContent = 'Could not copy'; }
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
     });
-    return copy;
-  }
-
-  function draw({ target, card, blocks, cursor, anchor }) {
-    let top = Infinity, left = 0;
-    if (card) {
-      const text = blocks.map((b) => b.text).join('\n\n');
-      const el = document.createElement('div');
-      el.className = 'card';
-      const head = document.createElement('div');
-      head.className = 'card-head';
-      const label = document.createElement('span');
-      label.textContent = `Translated to ${target}`;
-      head.append(label, copyButton(text));
-      const body = document.createElement('div');
-      body.className = 'card-text';
-      body.textContent = text;
-      el.append(head, body);
-      layer.append(el);
-      let x, y;
-      // a whole page or editor is too big to sit under; then the card goes where you were pointing
-      if (anchor && anchor.h < 260) {
-        // just under the box the text came from, or over its top when there's no room below
-        x = anchor.x;
-        y = anchor.y + anchor.h + 8;
-        if (y + el.offsetHeight > innerHeight - 12) y = Math.max(12, anchor.y + 8);
-      } else {
-        x = cursor.x + 12; y = cursor.y + 16;
-      }
-      x = Math.min(x, innerWidth - el.offsetWidth - 12); y = Math.min(y, innerHeight - el.offsetHeight - 12);
-      el.style.left = Math.max(12, x) + 'px'; el.style.top = Math.max(12, y) + 'px';
-      top = el.offsetTop; left = el.offsetLeft;
-    } else {
-      for (const b of blocks) {
-        if (!b.w) continue;
-        const el = document.createElement('p');
-        el.className = 'tb';
-        el.textContent = b.text;
-        el.title = b.original;
-        Object.assign(el.style, { left: b.x + 'px', top: b.y + 'px', width: b.w + 'px', height: b.h + 'px', background: b.bg || '#fff', color: b.fg || '#111' });
-        el.addEventListener('mousedown', (e) => { if (e.button === 0) el.classList.add('peek'); });
-        el.addEventListener('mouseup', () => el.classList.remove('peek'));
-        el.addEventListener('mouseleave', () => el.classList.remove('peek'));
-        layer.append(el);
-        fit(el, b);
-        if (b.y < top) { top = b.y; left = b.x; }
-      }
-    }
-    // the card's own header names the language, so the chip is only for the in-place view
-    chip.hidden = !!card;
-    chip.textContent = `Translated to ${target} · Esc to close`;
-    if (!card) chip.append(copyButton(blocks.filter((b) => b.w).map((b) => b.text).join('\n\n')));
-    chip.style.left = Math.max(8, left) + 'px';
-    chip.style.top = (top > 34 ? top - 28 : top + 4) + 'px';
-    if (top <= 34 && !card) chip.style.top = '8px';
+    dismiss.addEventListener('click', close);
+    const acts = make('div', 'acts');
+    acts.append(copy, dismiss);
+    const head = make('div', 'head');
+    head.append(make('span', 'label', `Translated to ${target}`), acts);
+    bubble.append(head, make('div', 'text', text), tail);
+    layer.append(bubble);
+    place(bubble, tail, at);
   }
 
   layer.addEventListener('mousedown', (e) => { if (e.target === layer) close(); });
-  addEventListener('wheel', close, { passive: true });
+  addEventListener('wheel', (e) => { if (!e.target.closest('.text')) close(); }, { passive: true });
   addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
-  api.on('translate:blocks', draw);
+  api.on('translate:bubble', show);
 })();

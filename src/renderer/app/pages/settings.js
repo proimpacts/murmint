@@ -105,6 +105,10 @@
   }
 
   let tab = 'general';
+  // shown under Dictation and under Privacy; both change the same setting
+  const aiFormattingRow = (cfg) => UI.row('AI formatting', 'Off: only your speech model is used and no text goes to a formatting provider. Murmint still removes fillers and fixes capitals and punctuation on this PC.',
+    UI.toggle(cfg.formatting.useAI !== false, (v) => App.set('formatting.useAI', v)));
+
   const TABS = [['general', 'General', 'tab-general'], ['dictation', 'Dictation', 'tab-dictation'], ['shortcuts', 'Shortcuts', 'tab-shortcuts'], ['insertion', 'Typing', 'tab-typing'], ['privacy', 'Privacy', 'tab-privacy'], ['appearance', 'Appearance', 'tab-appearance']];
 
   const group = (title, desc, ...rows) => h('section', { class: 'section' }, h('h2', null, title), desc ? h('p', { class: 'desc' }, desc) : null, UI.card(...rows));
@@ -128,6 +132,7 @@
     dictation(cfg) {
       return [
         group('How you dictate', null,
+          aiFormattingRow(cfg),
           UI.row('Live transcription', canLive(cfg) ? 'Words appear while you speak.' : 'Words appear while you speak. Needs an OpenAI key.', UI.toggle(cfg.dictation.realtime !== false, (v) => App.set('dictation.realtime', v))),
           UI.row('Speech support', 'For stutters and speech differences. Waits longer and reads carefully.', UI.toggle(cfg.dictation.speechSupport === true, (v) => App.set('dictation.speechSupport', v), 'Speech support')),
           UI.row('Noise reduction', 'Removes fans, hum and hiss.', UI.toggle(cfg.dictation.noiseReduction !== false, (v) => App.set('dictation.noiseReduction', v))),
@@ -156,9 +161,16 @@
     },
     privacy(cfg) {
       return [
-        group('What is sent', 'Audio is never saved. It goes to your speech provider, and the text to your formatting provider. With Message context on, the end of what is already in the box goes to the formatting provider too. Nowhere else.',
+        group('AI', 'Choose how much of your dictation goes to an AI provider.',
+          aiFormattingRow(cfg),
+          UI.row('Only use models on this PC', 'Cloud providers are skipped. Speech and formatting only use Murmint 1, Ollama, LM Studio or another server on this PC.', UI.toggle(cfg.privacy.localOnly === true, (v) => App.set('privacy.localOnly', v)))),
+        group('What is sent', 'Audio is never saved. It goes to your speech provider, and the text to your formatting provider. Nowhere else.',
           UI.row('Tell the AI which app I am in', 'Matches the tone. Window titles stay private.', UI.toggle(cfg.privacy.sendAppContext, (v) => App.set('privacy.sendAppContext', v))),
-          UI.row('Send my vocabulary to providers', 'Used as spelling hints.', UI.toggle(cfg.privacy.sendVocabulary, (v) => App.set('privacy.sendVocabulary', v)))),
+          UI.row('Send my vocabulary to providers', 'Used as spelling hints.', UI.toggle(cfg.privacy.sendVocabulary, (v) => App.set('privacy.sendVocabulary', v))),
+          UI.row('Send the text already in the box', 'The end of what is already typed goes to the formatting provider, so your words carry on from it. Never from password boxes.', UI.toggle(cfg.dictation.messageContext === true, (v) => App.set('dictation.messageContext', v)))),
+        group('Learning', 'Stored only on this PC.',
+          UI.row('Learn new words', 'Notices unusual names and terms you say often and suggests them on the Vocabulary page.', UI.toggle(cfg.privacy.learnWords !== false, (v) => App.set('privacy.learnWords', v))),
+          h('div', { class: 'flex mt2' }, UI.btn('Forget noticed words', { variant: 'ghost', onClick: () => { UI.confirm('Forget every word Murmint has noticed? Words already in your vocabulary stay.').then((ok) => { if (ok) { App.set('personal.vocabSeen', {}); UI.toast('Forgotten', 'ok'); } }); } }))),
         group('History', 'Stored only on this PC.',
           UI.row('Save dictation history', null, UI.toggle(cfg.privacy.saveHistory, (v) => App.set('privacy.saveHistory', v))),
           UI.row('Keep history for', null, UI.select([{ value: 7, label: '7 days' }, { value: 30, label: '30 days' }, { value: 90, label: '90 days' }, { value: 0, label: 'Until I delete it' }], cfg.privacy.retentionDays, (v) => App.set('privacy.retentionDays', Number(v)), 'w-md')),

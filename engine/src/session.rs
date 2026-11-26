@@ -380,9 +380,9 @@ async fn keys_let_go() {
     }
 }
 
-/// Ctrl+Alt+T: translates the selected text (or, with nothing selected, the text visible in the window) and lays the
-/// translation over the original, where it sits on screen. Apps that don't say where their text is get a card at the
-/// mouse instead.
+/// Ctrl+Alt+T: translates the selected text (or, with nothing selected, the text visible in the window) and shows the
+/// translation in a bubble that points at the original. Apps that don't say where their text is get it by the box the
+/// text was copied from, or by the mouse.
 async fn translate_selection() {
     keys_let_go().await;
     let c = cfg();
@@ -1430,7 +1430,7 @@ async fn commit(raw: &str, sec: f64, stt_ref: Option<String>, stt_cost: f64) {
     let mut text = crate::learn::strip_vocab_echo(&f.text, &personal);
     text = fit_to_app(text, &ctx);
     // unusual words heard in several sentences become vocabulary suggestions
-    if ctx.kind != "code" {
+    if ctx.kind != "code" && cfg()["privacy"]["learnWords"] != json!(false) {
         let mut st = core::get().store.lock().unwrap();
         let mut personal = st.config["personal"].clone();
         if crate::learn::notice(&mut personal, &text) {

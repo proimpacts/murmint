@@ -88,7 +88,7 @@
     { id: 'installing', name: 'Install', note: '' },
     { id: 'done', name: 'Done', note: '', go: ['finish', 'Open Murmint'] },
   ];
-  let page = 0;
+  let page = 0, updateStart = 0;
   const show = (i) => {
     page = i;
     const p = PAGES[i];
@@ -162,7 +162,22 @@
   window.setup = {
     dir(d) { $('dir').textContent = d; },
     apps(ids) { showApps(ids); },
-    progress(p, status) { $('bar').style.width = p + '%'; $('pct').textContent = Math.round(p) + '%'; if (status) $('status').textContent = status; },
+    progress(p, status) {
+      $('bar').style.width = p + '%'; $('pct').textContent = Math.round(p) + '%'; if (status) $('status').textContent = status;
+      if (updateStart && p > 8 && p < 100) {
+        const left = Math.max(1, Math.round((Date.now() - updateStart) / 1000 * (100 - p) / p));
+        $('p-installing').querySelector('.lead').textContent = left < 60 ? `About ${left} second${left === 1 ? '' : 's'} left. Your settings and history stay as they are.` : `About ${Math.round(left / 60)} min left. Your settings and history stay as they are.`;
+      }
+    },
+    // started by Murmint's own update button: straight to the progress page, and Murmint reopens by itself after
+    updating(version) {
+      updateStart = Date.now();
+      show(2);
+      $('p-installing').querySelector('h2').textContent = version ? `Updating to ${version}` : 'Updating Murmint';
+      $('p-installing').querySelector('.lead').textContent = 'Working out how long this takes. Your settings and history stay as they are.';
+      $('step-name').textContent = 'Update'; $('note').textContent = 'Murmint opens again when this is done.';
+      $('steps').hidden = true;
+    },
     done() { window.setup.progress(100, 'Done'); setTimeout(() => show(3), 450); },
     failed(msg) { const e = $('err'); e.style.display = 'block'; e.textContent = msg; $('status').textContent = 'Stopped'; },
   };

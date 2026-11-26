@@ -108,6 +108,7 @@ fn uninstall(dir: &Path, wipe: bool, p: &EventLoopProxy<Ev>) -> Result<(), Strin
         // settings and history only when asked
         let data = Path::new(&appdata).join("Murmint");
         let _ = std::fs::remove_file(data.join("data").join("account.bin"));
+        forget_sign_in(&data.join("data").join("secrets.json"));
         let _ = std::fs::remove_dir_all(if wipe { data } else { data.join("models") });
     }
     if wipe {
@@ -133,6 +134,15 @@ fn restore_windows_clipboard() {
         .creation_flags(NO_WINDOW)
         .status();
     let _ = Command::new("reg").args(["delete", r"HKCU\Software\Murmint", "/v", "ClipboardHistoryWas", "/f"]).creation_flags(NO_WINDOW).status();
+}
+
+// the engine keeps the sign-in with the provider keys; only the sign-in goes, the keys stay with the settings
+fn forget_sign_in(secrets: &Path) {
+    let Ok(text) = std::fs::read_to_string(secrets) else { return };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    if v.as_object_mut().and_then(|m| m.remove("murmint-account")).is_some() {
+        let _ = std::fs::write(secrets, v.to_string());
+    }
 }
 
 fn remove_self_later() {
