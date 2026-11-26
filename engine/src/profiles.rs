@@ -104,9 +104,11 @@ pub fn resolve_context(cfg: &Value, app: &Value) -> Context {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| cfg["formatting"]["style"].as_str().unwrap_or("natural").to_string());
     let styles = cfg["styles"].as_array().cloned().unwrap_or_default();
-    let style = styles
-        .iter()
-        .find(|s| s["id"] == style_id)
+    // a style that was deleted falls back to the app's own default, then your default style
+    let by_id = |id: &str| styles.iter().find(|s| s["id"] == id);
+    let style = by_id(&style_id)
+        .or_else(|| profile.and_then(|p| p["style"].as_str()).and_then(by_id))
+        .or_else(|| cfg["formatting"]["style"].as_str().and_then(by_id))
         .or(styles.first())
         .cloned()
         .unwrap_or(json!({ "id": "natural", "name": "Natural", "instruction": "" }));

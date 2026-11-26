@@ -46,7 +46,7 @@
   function summary(cfg, p) {
     const ov = overrideOf(p.id);
     if (ov.enabled === false) return 'Off. This app uses your default writing style.';
-    const bits = [`${ov.style ? styleName(cfg, ov.style) : fallbackStyle(cfg, p)} style`];
+    const bits = [`${ov.style && cfg.styles.some((x) => x.id === ov.style) ? styleName(cfg, ov.style) : fallbackStyle(cfg, p)} style`];
     if (typeof ov.intensity === 'number') bits.push(STRENGTH[ov.intensity + 1].label.toLowerCase());
     if (ov.instruction) bits.push(ov.overrideRules ? 'only your notes' : 'your notes');
     return bits.join(', ');
@@ -63,7 +63,7 @@
       h('div', { class: 'grow app-id' }, appIcon(p),
         h('div', null, h('div', { class: 't' }, p.name, off && UI.badge('Off')), h('div', { class: 'd' }, summary(cfg, p)))),
       h('div', { class: 'ctl' },
-        off ? null : UI.select(styleOptions, ov.style || '', (v) => setOverride(p.id, 'style', v, true)),
+        off ? null : UI.select(styleOptions, ov.style && cfg.styles.some((x) => x.id === ov.style) ? ov.style : '', (v) => setOverride(p.id, 'style', v, true)),
         UI.btn(editId === p.id ? 'Done' : 'Edit', { variant: 'ghost sm', onClick: () => { editId = editId === p.id ? null : p.id; App.render(); } })));
     if (editId !== p.id) return [row];
 

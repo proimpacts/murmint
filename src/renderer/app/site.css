@@ -396,3 +396,7 @@ input:focus, input:focus-visible, textarea:focus, textarea:focus-visible, [conte
 .mline .plogo.full img { width: 100%; height: 100%; }
 .mline { padding: 8px 4px; gap: 10px; }
 .mlist2 { margin-top: 8px; }
+/* the style editor: no line above or below it */
+.preset:has(+ .preset-edit) { border-bottom: 0; }
+.preset-edit { border-bottom: 0; padding-bottom: 6px; }
+.svc-body > .preset:last-child, .svc-body > .preset-edit:last-child { border-bottom: 0; }
