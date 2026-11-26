@@ -48,14 +48,11 @@ fn dir_size(p: &Path) -> u64 {
 }
 
 fn main() {
-    // an update started by Murmint: install over it with no window, keeping the desktop shortcut, then start it again
+    // an update started by Murmint: straight to the progress page, installed over the old one (settings and history
+    // live elsewhere, so they stay), then Murmint starts again
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--update") {
-        let dir = args.iter().find_map(|a| a.strip_prefix("--dir=")).map(String::from).unwrap_or_else(default_dir);
-        let _ = install(&dir, true, None);
-        let _ = Command::new(Path::new(&dir).join("Murmint.exe")).current_dir(&dir).spawn();
-        return;
-    }
+    let update = args.iter().any(|a| a == "--update");
+    let update_version = args.iter().find_map(|a| a.strip_prefix("--version=")).unwrap_or("").to_string();
     let mut ctx = WebContext::new(Some(std::env::temp_dir().join("murmint-setup-webview")));
     let Shell { event_loop, proxy, window, webview } = shell::open("Murmint Setup", HTML, &mut ctx);
     let webview = match webview {
@@ -69,7 +66,7 @@ fn main() {
         }
     };
 
-    let mut dir = default_dir();
+    let mut dir = args.iter().find_map(|a| a.strip_prefix("--dir=")).map(String::from).filter(|_| update).unwrap_or_else(default_dir);
     let mut installing = false;
     let mut installed = false;
     event_loop.run(move |event, _, flow| {
@@ -87,10 +84,29 @@ fn main() {
                 match v["cmd"].as_str().unwrap_or("") {
                     "ready" => {
                         let _ = webview.evaluate_script(&format!("setup.dir({})", js_str(&dir)));
-                        let installed = serde_json::to_string(&apps::installed())
+                        let found_apps = serde_json::to_string(&apps::installed())
                             .unwrap_or_else(|_| "[]".into());
-                        let _ = webview.evaluate_script(&format!("setup.apps({installed})"));
+                        let _ = webview.evaluate_script(&format!("setup.apps({found_apps})"));
+                        if update && !installing && !installed {
+                            installing = true;
+                            let _ = webview.evaluate_script(&format!("setup.updating({})", js_str(&update_version)));
+                            let (target, p) = (dir.clone(), proxy.clone());
+                            std::thread::spawn(move || {
+                                let ok = install(&target, true, Some(&p));
+                                let _ = p.send_event(Ev::Js(match &ok {
+                                    Ok(()) => "setup.progress(100,'Opening Murmint')".into(),
+                                    Err(e) => format!("setup.failed({})", js_str(e)),
+                                }));
+                                let _ = p.send_event(Ev::Ipc(
+                                    if ok.is_ok() { "{\"cmd\":\"_updated\"}" } else { "{\"cmd\":\"_failed\"}" }.into(),
+                                ));
+                            });
+                        }
                         window.set_visible(true);
+                    }
+                    "_updated" => {
+                        let _ = Command::new(Path::new(&dir).join("Murmint.exe")).current_dir(&dir).spawn();
+                        *flow = ControlFlow::Exit;
                     }
                     "drag" => {
                         let _ = window.drag_window();

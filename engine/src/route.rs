@@ -18,11 +18,19 @@ pub struct Cand<'a> {
     pub model: &'a Value,
 }
 
+/// A provider running on this PC (Murmint 1, Ollama, LM Studio, a local server), judged by its address.
+pub fn on_this_pc(p: &Value) -> bool {
+    let base = p["baseUrl"].as_str().unwrap_or("").to_lowercase();
+    let host = base.split("://").nth(1).unwrap_or(&base).split(['/', ':']).next().unwrap_or("");
+    p["local"] == json!(true) || matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0")
+}
+
 pub fn candidates<'a>(store: &'a Store, task: &str) -> Vec<Cand<'a>> {
     let mut out = vec![];
+    let local_only = store.config["privacy"]["localOnly"] == json!(true);
     for p in store.providers() {
         let id = p["id"].as_str().unwrap_or("");
-        if !store.provider_ready(id) {
+        if !store.provider_ready(id) || (local_only && !on_this_pc(p)) {
             continue;
         }
         for m in p["models"].as_array().into_iter().flatten() {
@@ -353,6 +361,23 @@ mod tests {
             rank_chat(&s, 0, 1.0, 1.0),
             ["openai::gpt-5.4-mini", "cloudflare::@cf/meta/llama-3.1-8b-instruct"]
         );
+    }
+
+    #[test]
+    fn only_providers_on_this_pc_count_as_local() {
+        assert!(on_this_pc(&json!({ "baseUrl": "http://localhost:11434/v1" })));
+        assert!(on_this_pc(&json!({ "baseUrl": "http://127.0.0.1:1234/v1" })));
+        assert!(on_this_pc(&json!({ "baseUrl": "https://example.com", "local": true })));
+        assert!(!on_this_pc(&json!({ "baseUrl": "https://api.openai.com/v1" })));
+        assert!(!on_this_pc(&json!({ "baseUrl": "https://localhost.evil.com/v1" })));
+    }
+
+    #[test]
+    fn local_only_leaves_out_cloud_providers() {
+        let mut s = store_with(&["openai", "cloudflare"]);
+        assert!(!candidates(&s, "chat").is_empty());
+        s.set("privacy.localOnly", json!(true));
+        assert!(candidates(&s, "chat").is_empty());
     }
 
     #[test]

@@ -1,12 +1,11 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, nativeTheme, clipboard, net } = require('electron');
+const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, nativeTheme, clipboard, shell: desktop } = require('electron');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 const { Core } = require('./core');
 const { Windows } = require('./windows');
-const account = require('./account');
-const localModels = require('./local-models');
 const betterClipboard = require('./better-clipboard');
 const translateView = require('./translate-view');
 
@@ -33,9 +32,7 @@ app.setAppUserModelId('dev.murmint.app');
 if (DEV) process.env.MURMINT_DEV = '1';
 
 let core, windows;
-let updater = null;
 let trimSoon = () => {};
-let siteIcon = () => Promise.resolve(null);
 const shell = { config: null, session: { state: 'idle', mode: null }, state: null };
 
 const store = {
@@ -61,6 +58,16 @@ function migrateFromSayso(dest) {
   } catch (e) { console.error('migration skipped:', e.message); }
 }
 
+// Earlier versions kept the sign-in in their own file; the engine keeps it with the other secrets now
+async function migrateAccount(dataDir) {
+  const file = path.join(dataDir, 'account.bin');
+  if (!fs.existsSync(file) || !safeStorage.isEncryptionAvailable()) return;
+  try {
+    await core.ui('account:import', JSON.parse(safeStorage.decryptString(fs.readFileSync(file))));
+    fs.rmSync(file, { force: true });
+  } catch (e) { console.error('sign-in migration skipped:', e.message); }
+}
+
 async function migrateSecrets() {
   if (!safeStorage.isEncryptionAvailable()) return;
   try {
@@ -84,9 +91,9 @@ function wireCore() {
   core.on('push', ({ ch, to, payload }) => {
     if (ch === 'state:changed') { shell.state = payload; shell.config = payload.config; shell.session = payload.session || shell.session; }
     if (ch === 'shell:apply') { applySideEffects(); return; }
-    if (ch === 'site:seen') { siteIcon(payload && payload.site).catch(() => {}); return; }
+    if (ch === 'account:code' && /^https:\/\//.test((payload && payload.verifyUrl) || '')) desktop.openExternal(payload.verifyUrl).catch(() => {});
     if (ch === 'gate:needed') { windows && windows.createMain(); return; }
-    if (ch === 'translate:show') { translateView.show(payload || {}).catch(() => {}); return; }
+    if (ch === 'translate:show') { translateView.show({ ...payload, accent: shell.config && shell.config.appearance.accent }).catch(() => {}); return; }
     if (ch === 'clipboard:copied') { betterClipboard.copied(payload); return; }
     if (ch === 'clipboard:open') { if (isOpen()) betterClipboard.open(payload && payload.hwnd, payload && payload.tab); return; }
     if (ch === 'overlay:state') {
@@ -104,6 +111,8 @@ function wireCore() {
 }
 
 const b64 = (b) => Buffer.from(b).toString('base64');
+// engine calls that may take longer than core.ui allows
+const slowUi = (ch, ms = 120000) => core.call('ui', { ch, args: [] }, ms).then((m) => m.value);
 
 async function memoryUse() {
   const metrics = app.getAppMetrics();
@@ -118,26 +127,27 @@ async function memoryUse() {
 function wireIpc() {
   for (const ch of ['state:get', 'config:set', 'provider:save', 'provider:remove', 'provider:key', 'provider:test', 'provider:presets', 'provider:models', 'provider:list', 'keys:capture', 'keys:down',
     'history:clear', 'history:delete', 'clipboard:write', 'usage:summary', 'usage:reset', 'router:preview', 'format:try',
-    'session:action', 'session:undo']) {
+    'session:action', 'session:undo', 'local:status', 'local:download', 'local:cancel',
+    'account:get', 'account:cancel', 'update:check', 'update:get', 'site:icon']) {
     ipcMain.handle(ch, (_e, ...a) => core.ui(ch, ...a));
   }
   const installedApps = require('./installed-apps');
   ipcMain.handle('apps:classic', () => installedApps.classic());
   ipcMain.handle('apps:store', () => installedApps.store());
   ipcMain.handle('apps:pick', () => installedApps.pick(windows && windows.main));
-  ipcMain.handle('account:get', () => account.user());
-  ipcMain.handle('account:signIn', () => account.signIn((code) => windows && windows.toMain('account:code', code)));
-  ipcMain.handle('account:cancel', () => account.cancel());
-  ipcMain.handle('account:signOut', async () => { await account.signOut(); await gate(); });
-  const localStatus = async () => ({ ...localModels.status(), free: await localModels.freeSpace() });
-  ipcMain.handle('onboarding:get', async () => ({ user: account.user(), open: isOpen(), local: await localStatus() }));
+  // starting Murmint 1 can take up to a minute the first time
+  ipcMain.handle('local:use', () => slowUi('local:use'));
+  ipcMain.handle('local:start', () => slowUi('local:start'));
+  // the code shows in the window while the engine waits for it to be used, up to its expiry
+  ipcMain.handle('account:signIn', () => slowUi('account:signIn', 16 * 60000));
+  ipcMain.handle('account:signOut', async () => { await core.ui('account:signOut'); await gate(); });
+  ipcMain.handle('onboarding:get', async () => ({ user: shell.state?.account || null, open: isOpen(), local: await core.ui('local:status') }));
   ipcMain.handle('onboarding:finish', async () => {
     store.set('onboarded', true);
     await useDefaults();
     await gate();
     return isOpen();
   });
-  ipcMain.handle('local:status', () => localStatus());
   ipcMain.handle('clipboard:list', () => betterClipboard.list());
   ipcMain.handle('clipboard:pick', (_e, what) => betterClipboard.pick(what));
   ipcMain.handle('clipboard:pin', (_e, id) => betterClipboard.pin(id));
@@ -146,11 +156,6 @@ function wireIpc() {
   ipcMain.handle('clipboard:close', () => betterClipboard.close());
   ipcMain.handle('clipboard:drag', (_e, on) => betterClipboard.drag(!!on));
   ipcMain.handle('clipboard:enable', (_e, on) => { store.set('clipboard.enabled', !!on); return betterClipboard.enable(core, !!on && isOpen()); });
-  ipcMain.handle('local:download', () => localModels.download(() => { if (isOpen()) localModels.use(core).catch(() => {}); }));
-  ipcMain.handle('local:use', async () => ({ ok: await localModels.use(core) }));
-  ipcMain.handle('local:cancel', () => localModels.cancel());
-  ipcMain.handle('local:start', async () => ({ ok: await localModels.start(core) }));
-  localModels.watch((p) => windows && windows.toMain('local:progress', p));
   ipcMain.handle('vocab:train', (_e, t) => core.ui('vocab:train', { wav_b64: b64(t.wav), durationSec: t.durationSec, term: t.term }));
   ipcMain.handle('rec:preview', (_e, p) => core.ui('rec:preview', { wav_b64: b64(p.wav), durationSec: p.durationSec }));
   ipcMain.on('rec:segment', (_e, seg) => core.send('rec:segment', { wav_b64: b64(seg.wav), durationSec: seg.durationSec, peak: seg.peak, final: !!seg.final, gapMs: seg.gapMs ?? null }));
@@ -174,46 +179,13 @@ function wireIpc() {
     if (!icons.has(exe)) { try { icons.set(exe, (await app.getFileIcon(exe, { size: 'normal' })).toDataURL()); } catch { icons.set(exe, null); } }
     return icons.get(exe);
   });
-  const favs = new Map();
-  const fetchIcon = async (url) => {
-    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 5000);
-    try {
-      const r = await net.fetch(url, { signal: ctl.signal, redirect: 'follow' });
-      const type = (r.headers.get('content-type') || '').split(';')[0].trim();
-      if (!r.ok) return null;
-      const buf = Buffer.from(await r.arrayBuffer());
-      if (!buf.length || buf.length > 300000) return null;
-      if (type.startsWith('text/html')) return { html: buf.toString('utf8'), base: r.url };
-      return 'data:' + (type.startsWith('image/') ? type : 'image/x-icon') + ';base64,' + buf.toString('base64');
-    } catch { return null; } finally { clearTimeout(t); }
-  };
-  const pending = new Map();
-  siteIcon = (host) => {
-    if (typeof host !== 'string' || !/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(host)) return Promise.resolve(null);
-    const known = favs.get(host);
-    if (known && (known.icon || Date.now() - known.at < 60e3)) return Promise.resolve(known.icon);
-    if (!pending.has(host)) pending.set(host, loadSiteIcon(host).finally(() => pending.delete(host)));
-    return pending.get(host);
-  };
-  ipcMain.handle('site:icon', (_e, host) => siteIcon(host));
-  async function loadSiteIcon(host) {
-    let icon = await fetchIcon('https://' + host + '/favicon.ico');
-    if (!icon || typeof icon !== 'string') {
-      const page = await fetchIcon('https://' + host + '/');
-      const html = page && page.html;
-      const href = html && ((/<link[^>]+rel=["'][^"']*icon[^"']*["'][^>]*>/i.exec(html) || [])[0] || '').match(/href=["']([^"']+)["']/i);
-      if (href) { const got = await fetchIcon(new URL(href[1], page.base).href); icon = typeof got === 'string' ? got : null; } else icon = null;
-    }
-    favs.set(host, { icon, at: Date.now() });
-    return icon;
-  }
   ipcMain.on('overlay:pin', (_e, on) => { windows.pinned = !!on; windows.syncOverlay(shell.session.state !== 'idle'); });
 }
 
 app.on('second-instance', () => windows?.createMain());
 
 // Murmint needs a signed-in account and a finished onboarding before it records anything.
-const isOpen = () => !!account.user() && shell.config?.onboarded === true;
+const isOpen = () => !!shell.state?.account && shell.config?.onboarded === true;
 async function gate() {
   const open = isOpen();
   await core.lock(!open).catch(() => {});
@@ -221,18 +193,11 @@ async function gate() {
   betterClipboard.enable(core, open && shell.config?.clipboard?.enabled !== false).catch(() => {});
 }
 
-// What onboarding leaves set up: Murmint 1 for speech, and formatting on Automatic, which picks the best and cheapest
-// model among the providers the person added.
+// What onboarding leaves set up: Murmint 1 for speech (once it is downloaded), and formatting on Automatic, which
+// picks the best and cheapest model among the providers the person added.
 async function useDefaults() {
-  if (localModels.installed()) await localModels.use(core).catch(() => {});
+  await slowUi('local:use').catch(() => {});
   store.set('models.format.routing', 'auto');
-}
-
-function startLocalModels() {
-  const cfg = shell.config;
-  if (!localModels.installed()) return;
-  if (!cfg.providers.some((p) => p.id === localModels.PROVIDER)) return; // removed under Models: leave it off
-  localModels.start(core).catch((e) => console.error('local models:', e.message));
 }
 
 app.whenReady().then(async () => {
@@ -244,10 +209,12 @@ app.whenReady().then(async () => {
   if (!isolated) migrateFromSayso(dataDir);
   wireCore();
   await core.init(dataDir, app.getVersion(), true);
-  shell.config = shell.config || (await core.ui('state:get')).config;
+  shell.state = shell.state || (await core.ui('state:get'));
+  shell.config = shell.config || shell.state.config;
   windows = new Windows(store);
   windows.onRaise = (hwnd) => core.ui('overlay:raise', hwnd).catch(() => {});
   migrateSecrets();
+  await migrateAccount(dataDir);
 
   const ses = electronSession.defaultSession;
   ses.setPermissionRequestHandler((wc, permission, cb) => cb(permission === 'media' || permission === 'clipboard-sanitized-write'));
@@ -257,9 +224,8 @@ app.whenReady().then(async () => {
   await gate();
   const hidden = process.argv.includes('--hidden') && isOpen();
   if (!hidden || DEV) windows.createMain({ show: !hidden });
-  startLocalModels();
-  const signedIn = !!account.user();
-  account.verify().then((u) => { if (signedIn && !u) gate().then(() => windows.toMain('gate:changed')); }).catch(() => {});
+  const signedIn = !!shell.state?.account;
+  core.ui('account:verify').then((u) => { if (signedIn && !u) gate().then(() => windows.toMain('gate:changed')); }).catch(() => {});
   let trimTimer = null;
   const trim = async () => {
     try {
@@ -280,18 +246,20 @@ app.whenReady().then(async () => {
   windows.createTray({ toggle: () => core.ui('session:action', 'toggle'), quit: () => app.quit() });
   applySideEffects();
 
-  updater = require('./updater').create({
-    enabled: () => !DEV && !(shell.config && shell.config.general && shell.config.general.autoUpdate === false),
-    notify: (u) => windows && windows.toMain('update:available', u),
-    token: () => require('./account').token(),
+  // the engine downloads and checks the installer; it then runs on its own, updates Murmint where it is and starts it again
+  ipcMain.handle('update:install', async () => {
+    const r = await slowUi('update:download', 15 * 60000).catch((e) => ({ ok: false, message: e.message }));
+    if (!r || !r.ok) {
+      if (r && r.page) desktop.openExternal(r.page).catch(() => {});
+      return r || { ok: false, message: 'Could not download the update' };
+    }
+    spawn(r.file, ['--update', `--dir=${path.dirname(process.execPath)}`, `--version=${r.version}`], { detached: true, stdio: 'ignore' }).unref();
+    setTimeout(() => app.exit(0), 400);
+    return { ok: true };
   });
-  updater.start();
-  ipcMain.handle('update:install', () => updater.install());
-  ipcMain.handle('update:check', async () => { const u = (await updater.check(true)) || updater.available || null; return u ? u : { none: true, error: updater.error }; });
-  ipcMain.handle('update:get', () => updater.available || null);
 
   local?.ready({ app, core, windows, store, shell, clipboard });
 });
 
-app.on('before-quit', () => { if (windows) windows.quitting = true; localModels.stop(); core?.stop(); });
+app.on('before-quit', () => { if (windows) windows.quitting = true; core?.stop(); });
 app.on('window-all-closed', () => { });

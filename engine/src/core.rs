@@ -45,6 +45,7 @@ pub fn state_for_renderer() -> Value {
         "session": crate::session::summary(),
         "helperReady": *c.helper_ready.lock().unwrap(),
         "version": *c.version.lock().unwrap(),
+        "account": crate::account::user(),
     })
 }
 
