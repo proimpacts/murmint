@@ -772,6 +772,18 @@ mod win {
         }
     }
 
+    /// Where the focused control is on screen (x, y, width, height in pixels): the box the selection was copied from,
+    /// for apps that don't say where the selected text itself is.
+    pub fn focus_rect() -> Option<[i32; 4]> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let auto: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let r = auto.GetFocusedElement().ok()?.CurrentBoundingRectangle().ok()?;
+            let (w, h) = (r.right - r.left, r.bottom - r.top);
+            (w > 0 && h > 0).then_some([r.left, r.top, w, h])
+        }
+    }
+
     pub fn read_focus() -> Option<(String, String)> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -839,6 +851,9 @@ mod win {
         None
     }
     pub fn read_focus() -> Option<(String, String)> {
+        None
+    }
+    pub fn focus_rect() -> Option<[i32; 4]> {
         None
     }
     pub fn text_regions(_page: bool) -> Option<(Vec<serde_json::Value>, bool)> {
@@ -1243,6 +1258,11 @@ pub fn keys_down() -> Vec<i32> {
 /// The selected text (or, with `page`, the visible text) paragraph by paragraph, with its place on screen.
 pub fn text_regions(page: bool) -> Option<(Vec<Value>, bool)> {
     win::text_regions(page)
+}
+
+/// Where the focused control is on screen, in pixels.
+pub fn focus_rect() -> Option<[i32; 4]> {
+    win::focus_rect()
 }
 
 /// Presses Backspace `n` times in the focused app.

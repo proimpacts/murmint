@@ -43,6 +43,36 @@
 
   const setRules = (list, render) => App.set('formatting.rules', list, render ? { render: true } : undefined);
 
+  // An editable list of rules: Writing has one, and so can each app. read() gives the saved list, write(list, render) saves it.
+  function ruleEditor(key, read, write) {
+    const rules = read();
+    const ruleList = h('div', { class: 'rule-list', 'data-rules': key });
+    rules.forEach((r, i) => {
+      const on = r.enabled !== false;
+      const text = h('div', { class: 'rule-text', contenteditable: 'plaintext-only', spellcheck: 'false' }, r.text);
+      const save = UI.debounce((v) => write(read().map((x) => (x.id === r.id ? { ...x, text: v } : x))));
+      text.addEventListener('input', () => { r.text = text.textContent; save(text.textContent); });
+      text.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); text.blur(); } });
+      const item = h('div', { class: `rule${on ? '' : ' off'}` },
+        h('span', { class: 'rule-n' }, String(i + 1)), text,
+        UI.toggle(on, (v) => { item.classList.toggle('off', !v); write(read().map((x) => (x.id === r.id ? { ...x, enabled: v } : x))); }, 'Rule on'),
+        h('button', { class: 'rule-del', type: 'button', title: 'Delete rule', on: { click: () => {
+          item.classList.add('leaving');
+          setTimeout(() => write(read().filter((x) => x.id !== r.id), true), 220);
+        } } }, icon('x')));
+      ruleList.append(item);
+    });
+    const newRule = h('input', { class: 'rule-new', placeholder: rules.length ? 'Add another rule and press Enter' : 'Write a rule, e.g. “Use British spelling”, and press Enter' });
+    newRule.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || !newRule.value.trim()) return;
+      write([...read(), { id: 'rule-' + UI.uid().slice(0, 8), text: newRule.value.trim(), enabled: true }], true);
+      setTimeout(() => { const n = ruleList.isConnected ? document.querySelector(`[data-rules="${key}"] .rule-new`) : null; if (n) n.focus(); }, 40);
+    });
+    ruleList.append(h('label', { class: 'rule add' }, h('span', { class: 'rule-n plus' }, icon('plus')), newRule));
+    return ruleList;
+  }
+  window.ruleEditor = ruleEditor;
+
   Pages.styles = {
     render(root, App) {
       const cfg = App.cfg(); const f = cfg.formatting;
@@ -53,31 +83,7 @@
           h('div', { class: 'svc-acts' }, UI.btn('New', { icon: 'plus', variant: 'sm', onClick: addStyleModal }))),
         h('div', { class: 'svc-body' }, ...cfg.styles.flatMap((st) => styleRow(cfg, st)))));
 
-      // rules
-      const rules = f.rules || [];
-      const ruleList = h('div', { class: 'rule-list' });
-      rules.forEach((r, i) => {
-        const on = r.enabled !== false;
-        const text = h('div', { class: 'rule-text', contenteditable: 'plaintext-only', spellcheck: 'false' }, r.text);
-        const save = UI.debounce((v) => setRules(App.cfg().formatting.rules.map((x) => (x.id === r.id ? { ...x, text: v } : x))));
-        text.addEventListener('input', () => { r.text = text.textContent; save(text.textContent); });
-        text.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); text.blur(); } });
-        const item = h('div', { class: `rule${on ? '' : ' off'}` },
-          h('span', { class: 'rule-n' }, String(i + 1)), text,
-          UI.toggle(on, (v) => { item.classList.toggle('off', !v); setRules(App.cfg().formatting.rules.map((x) => (x.id === r.id ? { ...x, enabled: v } : x))); }, 'Rule on'),
-          h('button', { class: 'rule-del', type: 'button', title: 'Delete rule', on: { click: () => {
-            item.classList.add('leaving');
-            setTimeout(() => setRules(App.cfg().formatting.rules.filter((x) => x.id !== r.id), true), 220);
-          } } }, icon('x')));
-        ruleList.append(item);
-      });
-      const newRule = h('input', { class: 'rule-new', placeholder: rules.length ? 'Add another rule and press Enter' : 'Write a rule, e.g. “Use British spelling”, and press Enter' });
-      newRule.addEventListener('keydown', (e) => {
-        if (e.key !== 'Enter' || !newRule.value.trim()) return;
-        setRules([...(App.cfg().formatting.rules || []), { id: 'rule-' + UI.uid().slice(0, 8), text: newRule.value.trim(), enabled: true }], true);
-        setTimeout(() => { const n = document.querySelector('.rule-new'); if (n) n.focus(); }, 40);
-      });
-      ruleList.append(h('label', { class: 'rule add' }, h('span', { class: 'rule-n plus' }, icon('plus')), newRule));
+      const ruleList = ruleEditor('writing', () => App.cfg().formatting.rules || [], setRules);
       root.append(UI.section('Rules', 'Your own instructions, followed every time.', ruleList));
 
       // intensity

@@ -20,7 +20,6 @@ function create({ enabled, notify, token }) {
   let found = null, timer = null;
 
   let lastError = null;
-  let releaseAt = null; // when Murmint is released to everyone, from the website
 
   // lastError keeps a failed check from showing as "up to date"
   async function check(force = false) {
@@ -30,7 +29,6 @@ function create({ enabled, notify, token }) {
       const r = await net.fetch(`${SITE}/api/update?_=${Date.now()}`, { headers: { 'User-Agent': 'Murmint-Updater' }, cache: 'no-store' });
       if (!r.ok) { lastError = `The website answered with an error (${r.status}).`; return null; }
       const info = await r.json();
-      releaseAt = info.releaseAt || releaseAt;
       if (!info.version || !newer(info.version, app.getVersion())) return null;
       found = { version: String(info.version), url: `${SITE}/api/update/installer`, size: info.size, sha256: info.sha256, page: `${SITE}/download` };
       notify(found);
@@ -50,7 +48,8 @@ function create({ enabled, notify, token }) {
       // only run an installer that matches what the website says it is
       if (found.sha256 && require('crypto').createHash('sha256').update(bytes).digest('hex') !== found.sha256) throw new Error('the download was damaged');
       fs.writeFileSync(file, bytes);
-      spawn(file, [], { detached: true, stdio: 'ignore' }).unref();
+      // the setup updates Murmint where it is, with no window, and starts it again when done
+      spawn(file, ['--update', `--dir=${path.dirname(process.execPath)}`], { detached: true, stdio: 'ignore' }).unref();
       setTimeout(() => app.exit(0), 400);
       return { ok: true };
     } catch (e) {
@@ -65,7 +64,7 @@ function create({ enabled, notify, token }) {
     timer = setInterval(check, EVERY);
   }
 
-  return { start, check, install, get available() { return found; }, get error() { return lastError; }, get releaseAt() { return releaseAt; } };
+  return { start, check, install, get available() { return found; }, get error() { return lastError; } };
 }
 
 module.exports = { create, newer };

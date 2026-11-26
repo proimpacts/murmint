@@ -195,10 +195,11 @@ fn drop_context_lines(out: &str, before: &str, said: &str) -> String {
     t.trim().to_string()
 }
 
-fn rules_text(fmt: &serde_json::Value) -> String {
-    fmt["rules"]
-        .as_array()
-        .into_iter()
+// rule lists (from Writing, then from the app) as one numbered list, leaving out switched-off and empty rules
+fn rules_text(lists: &[&serde_json::Value]) -> String {
+    lists
+        .iter()
+        .filter_map(|l| l.as_array())
         .flatten()
         .filter(|r| r["enabled"] != json!(false))
         .filter_map(|r| r["text"].as_str().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()))
@@ -224,9 +225,13 @@ fn compose(cfg: &Value, ctx: &Context, vocabulary: &[String], wants_list: bool, 
     // rewritten prompts drift further from the input; loosen the checks
     let better = cfg["formatting"]["betterPrompts"] != json!(false)
         && crate::prompt::is_ai_prompt(&ctx.kind, &ctx.app_name);
-    // an app can be set to use only its own notes, leaving out the rules from Writing
-    let own_only = ctx.profile_id.as_ref().is_some_and(|id| cfg["appOverrides"][id]["overrideRules"] == json!(true));
-    let rules = if own_only { String::new() } else { rules_text(fmt) };
+    // an app adds its own rules after the ones from Writing, or can be set to use only its own
+    let app = ctx.profile_id.as_ref().map(|id| &cfg["appOverrides"][id]).unwrap_or(&Value::Null);
+    let rules = if app["overrideRules"] == json!(true) {
+        rules_text(&[&app["rules"]])
+    } else {
+        rules_text(&[&fmt["rules"], &app["rules"]])
+    };
     let mut system = build_system_prompt(&PromptIn {
         style: &ctx.style,
         intensity: ctx.intensity,
@@ -546,8 +551,10 @@ Don't:
     #[test]
     fn rules_become_a_numbered_list_and_switched_off_ones_are_skipped() {
         let f = json!({ "rules": [{ "text": "Use British spelling.", "enabled": true }, { "text": "Never use exclamation marks." }, { "text": "Skip me", "enabled": false }, { "text": "  " }] });
-        assert_eq!(rules_text(&f), "1. Use British spelling.\n2. Never use exclamation marks.");
-        assert_eq!(rules_text(&json!({})), "");
+        assert_eq!(rules_text(&[&f["rules"]]), "1. Use British spelling.\n2. Never use exclamation marks.");
+        assert_eq!(rules_text(&[&json!({})["rules"]]), "");
+        let app = json!([{ "text": "Keep it short." }]);
+        assert_eq!(rules_text(&[&f["rules"], &app]), "1. Use British spelling.\n2. Never use exclamation marks.\n3. Keep it short.");
     }
 
     #[test]
