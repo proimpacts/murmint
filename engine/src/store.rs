@@ -300,7 +300,6 @@ impl Store {
         drop_extension_leftovers(&mut cfg);
         cfg["dictation"]["streaming"] = json!(false);
         // no longer settings: always on
-        cfg["formatting"]["useAI"] = json!(true);
         cfg["formatting"]["removeFillers"] = json!(true);
         if let Some(o) = cfg.as_object_mut() {
             o.remove("aiOnByDefault");
