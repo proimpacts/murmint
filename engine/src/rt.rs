@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -35,6 +35,7 @@ struct Attach {
     keywords: Vec<String>,
     hint: String,
     sink: Sink,
+    cancel: oneshot::Receiver<()>,
 }
 
 struct Slot {
@@ -42,7 +43,11 @@ struct Slot {
     busy: Arc<AtomicBool>,
 }
 
-static STREAMS: LazyLock<Mutex<HashMap<u64, mpsc::UnboundedSender<Cmd>>>> =
+struct Stream {
+    commands: mpsc::UnboundedSender<Cmd>,
+    cancel: oneshot::Sender<()>,
+}
+static STREAMS: LazyLock<Mutex<HashMap<u64, Stream>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static SLOTS: LazyLock<Mutex<HashMap<String, Slot>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -119,7 +124,8 @@ fn emit(sink: &Sink, stream: u64, mut v: Value) {
 
 pub fn open(req: OpenReq, sink: Sink) {
     let (tx, rx) = mpsc::unbounded_channel();
-    STREAMS.lock().unwrap().insert(req.stream, tx);
+    let (cancel, cancelled) = oneshot::channel();
+    STREAMS.lock().unwrap().insert(req.stream, Stream { commands: tx, cancel });
     let attach = Attach {
         stream: req.stream,
         cmd_rx: rx,
@@ -127,6 +133,7 @@ pub fn open(req: OpenReq, sink: Sink) {
         keywords: req.keywords,
         hint: req.hint,
         sink,
+        cancel: cancelled,
     };
     let key = slot_key(&req.cand);
     let attach = {
@@ -146,8 +153,13 @@ pub fn open(req: OpenReq, sink: Sink) {
 }
 
 pub fn cmd(stream: u64, c: Cmd) {
-    if let Some(tx) = STREAMS.lock().unwrap().get(&stream) {
-        let _ = tx.send(c);
+    let mut streams = STREAMS.lock().unwrap();
+    if matches!(c, Cmd::Close) {
+        if let Some(s) = streams.remove(&stream) {
+            let _ = s.cancel.send(());
+        }
+    } else if let Some(s) = streams.get(&stream) {
+        let _ = s.commands.send(c);
     }
 }
 
@@ -215,6 +227,8 @@ fn flush_ready(cur: &mut Cur) {
                 cur.st.queue.pop_front();
             }
             Some(None) => {
+                cur.st.incomplete = true;
+                cur.st.item_gap.remove(&front);
                 cur.st.queue.pop_front();
             }
             None => break,
@@ -227,6 +241,12 @@ fn on_server_event(cur: &mut Cur, v: &Value) {
     let item = v["item_id"].as_str().unwrap_or("").to_string();
     match ty {
         "conversation.item.input_audio_transcription.delta" => {
+            if item.is_empty()
+                || cur.st.completed.contains_key(&item)
+                || (cur.st.stopping && !cur.st.item_gap.contains_key(&item))
+            {
+                return;
+            }
             let acc = cur.st.partial.entry(item.clone()).or_default();
             acc.push_str(v["delta"].as_str().unwrap_or(""));
             emit(
@@ -235,30 +255,18 @@ fn on_server_event(cur: &mut Cur, v: &Value) {
                 json!({ "type": "partial", "text": acc.clone(), "item": item }),
             );
         }
-        "conversation.item.input_audio_transcription.completed" => {
+        "conversation.item.input_audio_transcription.completed" | "conversation.item.input_audio_transcription.failed" => {
+            if !cur.st.item_gap.contains_key(&item) || cur.st.completed.contains_key(&item) { return; }
             cur.st.partial.remove(&item);
-            if !cur.st.queue.contains(&item) {
-                cur.st.queue.push_back(item.clone());
-            }
-            cur.st.completed.insert(item, Some(v["transcript"].as_str().unwrap_or("").trim().to_string()));
-            cur.st.pending = cur.st.pending.saturating_sub(1);
-            flush_ready(cur);
-        }
-        "conversation.item.input_audio_transcription.failed" => {
-            cur.st.partial.remove(&item);
-            if !cur.st.queue.contains(&item) {
-                cur.st.queue.push_back(item.clone());
-            }
-            cur.st.completed.insert(item, None);
-            cur.st.pending = cur.st.pending.saturating_sub(1);
+            let text = v["transcript"].as_str().filter(|_| ty.ends_with(".completed")).map(|t| t.trim().to_string());
+            cur.st.completed.insert(item, text);
+            cur.st.pending -= 1;
             flush_ready(cur);
         }
         "input_audio_buffer.committed" => {
-            let gap = cur.st.gaps.pop_front().flatten();
-            if !item.is_empty() {
+            if !item.is_empty() && !cur.st.item_gap.contains_key(&item) {
+                let Some(gap) = cur.st.gaps.pop_front() else { return };
                 cur.st.item_gap.insert(item.clone(), gap);
-            }
-            if !item.is_empty() && !cur.st.queue.contains(&item) {
                 cur.st.queue.push_back(item);
             }
         }
@@ -269,8 +277,10 @@ fn on_server_event(cur: &mut Cur, v: &Value) {
                 || msg.to_lowercase().contains("buffer too small")
                 || msg.to_lowercase().contains("empty");
             if empty_commit {
-                cur.st.pending = cur.st.pending.saturating_sub(1);
-                cur.st.gaps.pop_front();
+                if cur.st.gaps.pop_front().is_some() {
+                    cur.st.pending -= 1;
+                    cur.st.incomplete = true;
+                }
             } else {
                 emit(
                     &cur.att.sink,
@@ -287,7 +297,7 @@ fn finished(cur: &Cur) -> bool {
     cur.st.finalizing && cur.st.pending == 0 && cur.st.queue.is_empty()
 }
 
-async fn run(cand: &Cand, first: Attach, mut att_rx: mpsc::Receiver<Attach>, busy: Arc<AtomicBool>) {
+async fn run(key: &str, cand: &Cand, mut first: Attach, mut att_rx: mpsc::Receiver<Attach>, busy: Arc<AtomicBool>) {
     let url = ws_url(&cand.base_url);
     let fail = |a: &Attach, message: String| {
         emit(&a.sink, a.stream, json!({ "type": "error", "message": message, "fatal": true }));
@@ -330,7 +340,8 @@ async fn run(cand: &Cand, first: Attach, mut att_rx: mpsc::Receiver<Attach>, bus
     let (mut tx, mut rx) = ws.split();
 
     let mut cur = Some(Cur { att: first, st: State::default() });
-    if !configure(&mut tx, cand, cur.as_ref().unwrap()).await {
+    if !configure(&mut tx, cand, cur.as_mut().unwrap()).await {
+        cur.take();
         return;
     }
     let mut idle_deadline = Instant::now() + IDLE_KEEP;
@@ -339,10 +350,19 @@ async fn run(cand: &Cand, first: Attach, mut att_rx: mpsc::Receiver<Attach>, bus
     ping.tick().await;
 
     macro_rules! detach {
-        ($ev:expr) => {{
-            if let Some(c) = cur.take() {
-                emit(&c.att.sink, c.att.stream, json!({ "type": $ev }));
+        () => {{
+            if let Some(mut c) = cur.take() {
+                c.st.partial.clear();
                 STREAMS.lock().unwrap().remove(&c.att.stream);
+                if c.st.incomplete {
+                    emit(&c.att.sink, c.att.stream, json!({ "type": "error", "message": "A live transcription turn failed", "fatal": true }));
+                    break;
+                }
+                emit(&c.att.sink, c.att.stream, json!({ "type": "done" }));
+                // An uncommitted tail must never carry over to another recording.
+                if c.st.since_commit != 0 {
+                    break;
+                }
             }
             final_deadline = None;
             idle_deadline = Instant::now() + IDLE_KEEP;
@@ -354,7 +374,11 @@ async fn run(cand: &Cand, first: Attach, mut att_rx: mpsc::Receiver<Attach>, bus
         let idle = cur.is_none();
         let cmd = async {
             match cur.as_mut() {
-                Some(c) => c.att.cmd_rx.recv().await,
+                Some(c) => tokio::select! {
+                    biased;
+                    _ = &mut c.att.cancel => None,
+                    cmd = c.att.cmd_rx.recv() => cmd,
+                },
                 None => std::future::pending().await,
             }
         };
@@ -364,7 +388,7 @@ async fn run(cand: &Cand, first: Attach, mut att_rx: mpsc::Receiver<Attach>, bus
                     Some(Ok(Message::Text(t))) => {
                         if let (Some(c), Ok(v)) = (cur.as_mut(), serde_json::from_str::<Value>(&t)) {
                             on_server_event(c, &v);
-                            if finished(c) { detach!("done"); }
+                            if finished(c) { detach!(); }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
@@ -386,32 +410,52 @@ async fn run(cand: &Cand, first: Attach, mut att_rx: mpsc::Receiver<Attach>, bus
                             cu.st.since_commit += n;
                             cu.st.total_samples += n as u64;
                             let ev = json!({ "type": "input_audio_buffer.append", "audio": base64::engine::general_purpose::STANDARD.encode(&up) });
-                            if tx.send(Message::text(ev.to_string())).await.is_err() { break; }
+                            let sent = tokio::select! {
+                                biased;
+                                _ = &mut cu.att.cancel => {
+                                    if let Some(c) = cur.take() {
+                                        emit(&c.att.sink, c.att.stream, json!({ "type": "closed" }));
+                                    }
+                                    break;
+                                }
+                                sent = tokio::time::timeout(Duration::from_secs(8), tx.send(Message::text(ev.to_string()))) => sent,
+                            };
+                            if !matches!(sent, Ok(Ok(()))) { break; }
                         }
                     }
                     Some(Cmd::Commit { last, gap_ms }) => {
                         if let Some(cu) = cur.as_mut() {
                             if cu.st.since_commit >= MIN_COMMIT_SAMPLES {
                                 let commit = json!({ "type": "input_audio_buffer.commit" }).to_string();
-                                if tx.send(Message::text(commit)).await.is_err() {
-                                    break;
-                                }
+                                let sent = tokio::select! {
+                                    biased;
+                                    _ = &mut cu.att.cancel => {
+                                        if let Some(c) = cur.take() {
+                                            emit(&c.att.sink, c.att.stream, json!({ "type": "closed" }));
+                                        }
+                                        break;
+                                    }
+                                    sent = tokio::time::timeout(Duration::from_secs(8), tx.send(Message::text(commit))) => sent,
+                                };
+                                if !matches!(sent, Ok(Ok(()))) { break; }
                                 cu.st.pending += 1;
                                 cu.st.gaps.push_back(gap_ms);
                                 cu.st.since_commit = 0;
                             }
                             if last {
+                                cu.st.stopping = true;
                                 cu.st.finalizing = true;
                                 final_deadline = Some(Instant::now() + FINAL_WAIT);
                             }
-                            if finished(cu) { detach!("done"); }
+                            if finished(cu) { detach!(); }
                         }
                     }
                     Some(Cmd::Close) | None => {
-                        if cur.is_some() {
-                            let _ = tx.send(Message::text(json!({ "type": "input_audio_buffer.clear" }).to_string())).await;
-                            detach!("closed");
+                        if let Some(c) = cur.take() {
+                            STREAMS.lock().unwrap().remove(&c.att.stream);
+                            emit(&c.att.sink, c.att.stream, json!({ "type": "closed" }));
                         }
+                        break;
                     }
                 }
             }

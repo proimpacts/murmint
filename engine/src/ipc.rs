@@ -371,11 +371,11 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
         "update:download" => crate::updater::download().await,
         "site:icon" => crate::site_icons::icon(arg(0).as_str().unwrap_or("")).await,
         "session:lock" => {
-            session::LOCKED.store(arg(0) == json!(true), std::sync::atomic::Ordering::Relaxed);
+            session::set_locked(arg(0) == json!(true));
             Value::Null
         }
         "rec:preview" => json!(
-            session::preview(b64(&arg(0)["wav_b64"]), arg(0)["durationSec"].as_f64().unwrap_or(0.0)).await
+            session::preview(arg(1).as_u64().unwrap_or(0), b64(&arg(0)["wav_b64"]), arg(0)["durationSec"].as_f64().unwrap_or(0.0)).await
         ),
         "secrets:pending" => with_store(|s| {
             json!(s
@@ -432,13 +432,14 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
 
 pub fn send(ch: &str, a: &[Value]) {
     let arg = |i: usize| a.get(i).cloned().unwrap_or(Value::Null);
+    let Some(sid) = a.get(1).and_then(Value::as_u64) else { return };
     match ch {
-        "rec:chunk" => session::on_chunk(b64(&arg(0))),
-        "rec:boundary" => session::on_boundary(arg(0)["final"] == json!(true), arg(0)["gapMs"].as_u64()),
-        "rec:autostop" => session::on_auto_stop(),
+        "rec:chunk" => session::on_chunk(sid, b64(&arg(0))),
+        "rec:boundary" => session::on_boundary(sid, arg(0)["final"] == json!(true), arg(0)["gapMs"].as_u64()),
+        "rec:autostop" => session::on_auto_stop(sid),
         "rec:segment" => {
             let s = arg(0);
-            session::on_segment(session::Seg {
+            session::on_segment(sid, session::Seg {
                 wav: b64(&s["wav_b64"]),
                 duration_sec: s["durationSec"].as_f64().unwrap_or(0.0),
                 peak: s["peak"].as_f64().unwrap_or(0.0),
@@ -446,7 +447,7 @@ pub fn send(ch: &str, a: &[Value]) {
                 gap_ms: s["gapMs"].as_u64(),
             });
         }
-        "rec:error" => session::rec_error(arg(0).as_str().unwrap_or("Something went wrong")),
+        "rec:error" => session::rec_error(sid, arg(0).as_str().unwrap_or("Something went wrong")),
         _ => {}
     }
 }
