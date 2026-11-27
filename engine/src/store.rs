@@ -183,29 +183,73 @@ pub struct Store {
     pub usage: Value,
     pub latency: HashMap<String, f64>,
     dirty: [bool; 4],
+    degraded: [bool; 4],
 }
 
 const FILES: [&str; 4] = ["config.json", "secrets.json", "history.json", "usage.json"];
 
+fn read_checked(path: &Path, valid: fn(&Value) -> bool) -> Result<Option<Value>, ()> {
+    let mut retried = false;
+    let raw = loop {
+        match std::fs::read_to_string(path) {
+            Ok(s) => break s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => {
+                if !retried {
+                    retried = true;
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    continue;
+                }
+                return Err(());
+            }
+        }
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(v) if valid(&v) => Ok(Some(v)),
+        _ => Err(()),
+    }
+}
+
+fn open_checked(dir: &Path, name: &str, valid: fn(&Value) -> bool) -> (Option<Value>, bool) {
+    let path = dir.join(name);
+    match read_checked(&path, valid) {
+        Ok(v) => (v, false),
+        Err(()) => {
+            let bak = dir.join(format!("{name}.bak"));
+            if !bak.exists() {
+                let _ = std::fs::copy(&path, &bak);
+            }
+            (None, true)
+        }
+    }
+}
+
 impl Store {
     pub fn open(dir: &Path) -> Store {
         let _ = std::fs::create_dir_all(dir);
-        let read = |n: &str| {
-            std::fs::read_to_string(dir.join(n)).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        };
-        let saved = read("config.json").unwrap_or(json!({}));
+        let (cfg_val, cfg_bad) = open_checked(dir, "config.json", Value::is_object);
+        let (sec_val, sec_bad) = open_checked(dir, "secrets.json", Value::is_object);
+        let (hist_val, hist_bad) = open_checked(dir, "history.json", Value::is_array);
+        let (usage_val, usage_bad) =
+            open_checked(dir, "usage.json", |v| v.is_object() && v.get("days").is_some());
+        let saved = cfg_val.unwrap_or(json!({}));
         let mut s = Store {
             dir: dir.to_path_buf(),
             config: Value::Null,
-            secrets: read("secrets.json").and_then(|v| v.as_object().cloned()).unwrap_or_default(),
-            history: read("history.json").and_then(|v| v.as_array().cloned()).unwrap_or_default(),
-            usage: read("usage.json").filter(|v| v.get("days").is_some()).unwrap_or(json!({ "days": {} })),
+            secrets: sec_val.and_then(|v| v.as_object().cloned()).unwrap_or_default(),
+            history: hist_val.and_then(|v| v.as_array().cloned()).unwrap_or_default(),
+            usage: usage_val.unwrap_or(json!({ "days": {} })),
             latency: HashMap::new(),
             dirty: [false; 4],
+            degraded: [cfg_bad, sec_bad, hist_bad, usage_bad],
         };
         s.config = s.load_config(&saved);
         s.prune_history();
         s
+    }
+
+    pub fn is_degraded(&self, name: &str) -> bool {
+        FILES.iter().position(|f| *f == name).is_some_and(|i| self.degraded[i])
     }
 
     fn load_config(&self, saved: &Value) -> Value {
@@ -310,7 +354,7 @@ impl Store {
     // atomic write; failures retry next tick
     pub fn flush(&mut self) {
         for (i, name) in FILES.iter().enumerate() {
-            if !self.dirty[i] {
+            if !self.dirty[i] || self.degraded[i] {
                 continue;
             }
             self.dirty[i] = false;
