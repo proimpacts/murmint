@@ -891,122 +891,136 @@ pub fn stop() {
         }
         set_state(&mut g, St::Processing, json!({}));
         sid = g.id;
+        recorder(sid, "stop", Value::Null);
     }
-    recorder("stop", Value::Null);
     after(12_000, move || {
-        let (hang, live_unfinished) = {
-            let g = s();
-            (
-                g.id == sid && g.state == St::Processing && !g.aborted,
-                g.rt.as_ref().is_some_and(|r| !r.finished),
-            )
+        let (hang, live_unfinished, already_failed) = {
+            let mut g = s();
+            let hang = g.id == sid && g.state == St::Processing && !g.aborted;
+            let live_unfinished = g.rt.as_ref().is_some_and(|r| !r.finished);
+            let mut already_failed = false;
+            if hang && live_unfinished {
+                if let Some(r) = g.rt.as_mut() {
+                    r.stopping = true;
+                    already_failed = r.failed;
+                }
+            }
+            (hang, live_unfinished, already_failed)
         };
         if !hang {
             return;
         }
         if live_unfinished {
-            rt_fail("no reply from the live stream");
+            if already_failed {
+                rt_fallback(sid);
+            } else {
+                rt_fail(sid, "no reply from the live stream");
+            }
             return;
         }
         if inflight() == 0 {
-            enqueue(async {
-                flush().await;
-                finalize_result().await;
+            enqueue(sid, async move {
+                flush(sid).await;
+                finalize_result(sid);
             });
         }
     });
 }
 
 pub fn pause() {
-    let g = s();
-    if g.state == St::Listening {
-        drop(g);
-        recorder("pause", Value::Null);
-        let mut g = s();
+    let mut g = s();
+    if g.state == St::Listening && g.rec_launched {
+        recorder(g.id, "pause", Value::Null);
         set_state(&mut g, St::Paused, json!({}));
     }
 }
 pub fn resume() {
-    let g = s();
+    let mut g = s();
     if g.state == St::Paused {
-        drop(g);
-        recorder("resume", Value::Null);
-        let mut g = s();
+        recorder(g.id, "resume", Value::Null);
         set_state(&mut g, St::Listening, json!({}));
     }
 }
 
 pub fn cancel() {
-    {
-        let mut g = s();
-        if g.state == St::Idle {
-            return;
-        }
-        g.aborted = true;
-        g.id += 1;
-        g.buffer.clear();
+    let mut g = s();
+    if g.state != St::Idle {
+        invalidate(&mut g, "cancel");
+        g.mode = None;
+        set_state(&mut g, St::Idle, json!({ "result": "cancelled" }));
     }
-    rt_end(true);
-    recorder("cancel", Value::Null);
-    finish("cancelled", json!({}));
 }
 
-fn finish(kind: &str, extra: Value) {
+pub fn set_locked(locked: bool) {
     let mut g = s();
-    g.stop_watch += 1;
-    if kind == "cancelled" {
-        set_state(&mut g, St::Idle, json!({ "result": "cancelled" }));
+    LOCKED.store(locked, Ordering::Release);
+    if locked {
+        invalidate(&mut g, "reset");
         g.mode = None;
-        return;
+        set_state(&mut g, St::Idle, json!({ "reset": true }));
     }
-    set_state(&mut g, if kind == "success" { St::Success } else { St::Error }, extra);
+}
+
+fn invalidate(g: &mut Sess, cmd: &str) {
+    recorder(g.id, cmd, Value::Null);
+    g.aborted = true;
+    g.id += 1;
+    GENERATION.send_replace(g.id);
+    g.idle_timer += 1;
+    g.buffer.clear();
+    g.pcm.clear();
+    g.before_task = None;
+    if let Some(rt) = g.rt.take() {
+        rt::cmd(rt.stream, rt::Cmd::Close);
+    }
+}
+
+fn finish(g: &mut Sess, kind: &str, extra: Value) {
+    g.stop_watch += 1;
+    set_state(g, if kind == "success" { St::Success } else { St::Error }, extra);
     g.idle_timer += 1;
     let (timer, hold) = (g.idle_timer, if kind == "success" { 300 } else { 3800 });
-    drop(g);
     after(hold, move || {
         let mut g = s();
-        if g.idle_timer == timer && inflight() == 0 && !is_active(&g) {
+        if g.idle_timer == timer && !is_active(&g) {
             set_state(&mut g, St::Idle, json!({}));
             g.mode = None;
         }
     });
 }
 
-async fn finalize_result() {
+fn finalize_result(sid: u64) {
     let mut g = s();
-    if g.aborted {
+    if !current(&g, sid) || g.state != St::Processing {
         return;
     }
     let (err, ins, notice, skip) = (g.last_error.take(), g.inserted, g.notice.take(), g.skip_msg.take());
     let text = g.session_text.join(" ");
     let unplaced = std::mem::take(&mut g.unplaced).join(" ");
-    drop(g);
     if !unplaced.is_empty() {
-        finish("success", json!({ "text": unplaced, "copy": true }));
+        finish(&mut g, "success", json!({ "text": unplaced, "copy": true, "message": err }));
     } else if let Some(e) = err {
-        finish("error", json!({ "message": e }));
+        finish(&mut g, "error", json!({ "message": e }));
     } else if ins > 0 {
-        finish("success", json!({ "text": text }));
+        finish(&mut g, "success", json!({ "text": text }));
     } else if let Some(n) = notice {
-        finish("success", json!({ "message": n }));
+        finish(&mut g, "success", json!({ "message": n }));
     } else {
-        finish("error", json!({ "message": skip.unwrap_or_else(|| "Didn't catch that".into()) }));
+        finish(&mut g, "error", json!({ "message": skip.unwrap_or_else(|| "Didn't catch that".into()) }));
     }
 }
 
-pub fn rec_error(message: &str) {
-    {
-        let mut g = s();
-        g.aborted = true;
-        g.id += 1;
-        g.last_error = None;
-    }
-    finish("error", json!({ "message": message }));
-}
-
-pub fn on_chunk(buf: Vec<u8>) {
+pub fn rec_error(sid: u64, message: &str) {
     let mut g = s();
-    if g.aborted {
+    if current(&g, sid) && (is_active(&g) || g.state == St::Processing) {
+        invalidate(&mut g, "reset");
+        finish(&mut g, "error", json!({ "message": message }));
+    }
+}
+
+pub fn on_chunk(sid: u64, buf: Vec<u8>) {
+    let mut g = s();
+    if !current(&g, sid) {
         return;
     }
     let Some(r) = g.rt.as_mut() else { return };
@@ -1052,12 +1066,15 @@ pub fn on_boundary(last: bool, gap_ms: Option<u64>) {
         rt::cmd(stream, rt::Cmd::Commit { last, gap_ms });
     }
     if fallback {
-        rt_fallback();
+        rt_fallback(sid);
         return;
     }
     if last {
         let timer = {
             let mut g = s();
+            if !current(&g, sid) {
+                return;
+            }
             let t = TIMER_SEQ.fetch_add(1, Ordering::SeqCst) as u64;
             if let Some(r) = g.rt.as_mut() {
                 r.timer = t;
@@ -1109,105 +1126,100 @@ pub fn on_rt_event(m: Value) {
     }
 }
 
-async fn rt_piece(text: String, gap: Option<u64>) {
-    if s().aborted || text.is_empty() {
+async fn rt_piece(sid: u64, text: String, gap: Option<u64>) {
+    if text.is_empty() {
         return;
     }
     if hallucination(&text) && word_count(&text) <= 2 {
         return;
     }
     let r = s().rt.as_ref().map(|r| r.r.clone());
-    handle_raw(&text, (word_count(&text) as f64 / 2.5).max(1.0), r, 0.0, gap).await;
+    handle_raw(sid, &text, 0.0, r, 0.0, gap);
 }
 
-async fn rt_finish() {
-    let (r, bytes) = {
+async fn rt_finish(sid: u64) {
+    {
         let mut g = s();
-        let aborted = g.aborted;
-        let Some(rt) = g.rt.as_mut() else { return };
-        if rt.finished || aborted {
+        if !current(&g, sid) {
             return;
         }
+        let Some(rt) = g.rt.as_mut().filter(|rt| !rt.finished && !rt.failed) else { return };
         rt.finished = true;
-        (rt.r.clone(), rt.bytes)
-    };
-    let audio_sec = bytes as f64 / (PCM_RATE * 2) as f64;
-    let price = {
-        let st = core::get().store.lock().unwrap();
-        st.find_model(&r).map(|(_, m)| m["price"]["perMinute"].as_f64().unwrap_or(0.0))
-    };
-    if let (Some(per_min), true) = (price, audio_sec > 0.0) {
-        let cost = per_min * audio_sec / 60.0;
-        hub::on_usage(json!({ "model": r, "cost": cost, "modelAudioSec": audio_sec }));
-        let (hold, ins) = {
-            let g = s();
-            (!g.buffer.is_empty(), g.inserted)
-        };
-        let last_id = core::get()
-            .store
-            .lock()
-            .unwrap()
-            .history
-            .first()
-            .map(|h| (h["id"].clone(), h["cost"].as_f64().unwrap_or(0.0)));
-        match (hold || ins == 0, last_id) {
-            (false, Some((id, old))) => {
-                core::get()
-                    .store
-                    .lock()
-                    .unwrap()
-                    .update_history(id.as_str().unwrap_or(""), &json!({ "cost": old + cost }));
-                core::changed("history");
-            }
-            _ => s().extra_cost += cost,
-        }
+        record_live_audio(&mut g);
+        g.pcm.clear();
     }
-    flush().await;
-    rt_end(false);
-    finalize_result().await;
+    flush(sid).await;
+    finalize_result(sid);
 }
 
-fn rt_fail(message: &str) {
-    let stopping = {
+fn record_live_audio(g: &mut Sess) {
+    let Some(rt) = g.rt.as_ref() else { return };
+    let sec = rt.bytes as f64 / (PCM_RATE * 2) as f64;
+    g.live_sec = Some(sec);
+    if sec > 0.0 {
+        let mut st = core::get().store.lock().unwrap();
+        let cost = st.find_model(&rt.r).map_or(0.0, |(_, m)| crate::usage::cost_stt(m, sec));
+        st.record_usage(&day_key(now_ms()), &json!({ "model": rt.r, "cost": cost, "modelAudioSec": sec }));
+        g.extra_cost += cost;
+    }
+}
+
+fn rt_fail(sid: u64, message: &str) {
+    let (should_fallback, already_failed) = {
         let mut g = s();
-        let Some(r) = g.rt.as_mut() else { return };
-        if r.finished || r.failed {
+        if !current(&g, sid) {
             return;
         }
-        r.failed = true;
-        r.stopping
+        let processing = g.state == St::Processing;
+        let Some(r) = g.rt.as_mut() else { return };
+        if r.finished {
+            return;
+        }
+        if r.failed {
+            (processing || r.stopping, true)
+        } else {
+            r.failed = true;
+            rt::cmd(r.stream, rt::Cmd::Close);
+            (processing || r.stopping, false)
+        }
     };
-    toast(
-        "info",
-        &format!(
-            "Live transcription unavailable ({}). Using standard transcription.",
-            message.chars().take(120).collect::<String>()
-        ),
-    );
-    if stopping {
-        rt_fallback();
+    if !already_failed {
+        toast(
+            "info",
+            &format!(
+                "Live transcription interrupted ({}).",
+                message.chars().take(120).collect::<String>()
+            ),
+        );
+    }
+    if should_fallback {
+        rt_fallback(sid);
     }
 }
 
-fn rt_fallback() {
-    let (audio, finals) = {
+fn rt_fallback(sid: u64) {
+    let (audio, recover) = {
         let mut g = s();
+        if !current(&g, sid) {
+            return;
+        }
         let Some(r) = g.rt.as_mut() else { return };
         if r.finished {
             return;
         }
         r.finished = true;
-        let finals = r.finals;
-        (std::mem::take(&mut g.pcm), finals)
+        let (finals, bytes) = (r.finals, r.bytes);
+        let recover = finals == 0 && !g.pcm.is_empty() && bytes == g.pcm.len() && !g.speech_refs.is_empty();
+        record_live_audio(&mut g);
+        (std::mem::take(&mut g.pcm), recover)
     };
-    rt_end(true);
-    enqueue(async move {
-        if finals == 0 && !audio.is_empty() {
+    enqueue(sid, async move {
+        if recover {
             let peak = audio
                 .chunks_exact(2)
                 .map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs() as f32 / 32768.0)
                 .fold(0.0f32, f32::max);
-            process(Seg {
+            process(sid, Seg {
                 wav: pcm_to_wav(&audio),
                 duration_sec: audio.len() as f64 / (PCM_RATE * 2) as f64,
                 peak: peak.max(0.05) as f64,
