@@ -12,14 +12,33 @@ const dir = () => path.join(app.getPath('userData'), 'data', 'clipboard');
 const listFile = () => path.join(dir(), 'items.json');
 const placeFile = () => path.join(dir(), 'place.json');
 const GIF_MAX = 15 * 1024 * 1024;
+const GIF_TIMEOUT_MS = 15000;
 const KEY = 'HKCU\\Software\\Microsoft\\Clipboard';
 const SAVED = 'HKCU\\Software\\Murmint';
 
 let items = null, core = null, win = null, target = 0;
+let quitting = false, enableSeq = 0;
+
+function sweepOrphans() {
+  try {
+    const d = dir();
+    if (!fs.existsSync(d)) return;
+    const keep = new Set((items || []).map((x) => (x && x.file ? path.resolve(x.file) : null)).filter(Boolean));
+    for (const name of fs.readdirSync(d)) {
+      if (!/\.(gif|png)$/i.test(name)) continue;
+      const full = path.resolve(path.join(d, name));
+      if (!keep.has(full)) {
+        try { fs.unlinkSync(full); } catch { }
+      }
+    }
+  } catch { }
+}
 
 function load() {
   if (items) return items;
   try { items = JSON.parse(fs.readFileSync(listFile(), 'utf8')); } catch { items = []; }
+  if (!Array.isArray(items)) items = [];
+  sweepOrphans();
   return items;
 }
 function save() {
@@ -50,43 +69,98 @@ async function keepGif(item, from) {
   try {
     fs.mkdirSync(dir(), { recursive: true });
     if (from.url) {
-      const r = await net.fetch(from.url);
-      const buf = Buffer.from(await r.arrayBuffer());
-      if (!r.ok || buf.length > GIF_MAX || buf.slice(0, 3).toString() !== 'GIF') return;
-      fs.writeFileSync(file, buf);
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), GIF_TIMEOUT_MS);
+      if (timer.unref) timer.unref();
+      try {
+        const r = await net.fetch(from.url, { signal: ac.signal });
+        if (!r.ok) { ac.abort(); return null; }
+        const cl = Number(r.headers.get('content-length'));
+        if (Number.isFinite(cl) && cl > GIF_MAX) { ac.abort(); return null; }
+        if (!r.body || typeof r.body.getReader !== 'function') {
+          const buf = Buffer.from(await r.arrayBuffer());
+          if (buf.length > GIF_MAX || buf.slice(0, 3).toString() !== 'GIF') return null;
+          fs.writeFileSync(file, buf);
+        } else {
+          const reader = r.body.getReader();
+          const chunks = [];
+          let total = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = Buffer.from(value);
+            total += chunk.length;
+            if (total > GIF_MAX) {
+              ac.abort();
+              try { await reader.cancel(); } catch { }
+              return null;
+            }
+            chunks.push(chunk);
+          }
+          const buf = Buffer.concat(chunks, total);
+          if (buf.length > GIF_MAX || buf.slice(0, 3).toString() !== 'GIF') return null;
+          fs.writeFileSync(file, buf);
+        }
+      } finally {
+        clearTimeout(timer);
+      }
     } else {
-      if (fs.statSync(from.file).size > GIF_MAX) return;
+      if (fs.statSync(from.file).size > GIF_MAX) return null;
       fs.copyFileSync(from.file, file);
     }
-  } catch { return; }
+  } catch { return null; }
   add({ ...item, file });
+  return file;
 }
 
 // a copy the engine saw: { text, files, gif, image }
 function copied(c) {
   const at = Date.now();
-  if (c.gif) return keepGif({ id: id(), kind: 'gif', url: c.gif, at }, { url: c.gif });
+  if (c.gif) {
+    load();
+    const existing = items.find((x) => x.kind === 'gif' && (x.source === c.gif || x.url === c.gif) && x.file && fs.existsSync(x.file));
+    if (existing) return add({ ...existing, source: existing.source || c.gif, at });
+    return keepGif({ id: id(), kind: 'gif', url: c.gif, source: c.gif, at }, { url: c.gif });
+  }
   const gifFile = (c.files || []).find((f) => /\.gif$/i.test(f));
-  if (gifFile && c.files.length === 1) return keepGif({ id: id(), kind: 'gif', source: gifFile, at }, { file: gifFile });
+  if (gifFile && c.files.length === 1) {
+    load();
+    const existing = items.find((x) => x.kind === 'gif' && x.source === gifFile && x.file && fs.existsSync(x.file));
+    if (existing) return add({ ...existing, at });
+    return keepGif({ id: id(), kind: 'gif', source: gifFile, at }, { file: gifFile });
+  }
   if (c.image && !c.text) {
     const img = clipboard.readImage();
     if (img.isEmpty()) return;
-    const file = path.join(dir(), id() + '.png');
-    try { fs.mkdirSync(dir(), { recursive: true }); fs.writeFileSync(file, img.resize({ width: Math.min(1600, img.getSize().width) }).toPNG()); } catch { return; }
-    return add({ id: id(), kind: 'image', file, at });
+    const png = img.resize({ width: Math.min(1600, img.getSize().width) }).toPNG();
+    const hash = crypto.createHash('sha256').update(png).digest('hex').slice(0, 16);
+    load();
+    const existing = items.find((x) => x.kind === 'image' && x.hash === hash && x.file && fs.existsSync(x.file));
+    if (existing) return add({ ...existing, at });
+    const itemId = id();
+    const file = path.join(dir(), itemId + '.png');
+    try { fs.mkdirSync(dir(), { recursive: true }); fs.writeFileSync(file, png); } catch { return; }
+    return add({ id: itemId, kind: 'image', hash, file, at });
   }
-  if (c.files && c.files.length) return add({ id: id(), kind: 'files', text: c.files.join('\n'), at });
+  if (c.files && c.files.length) return add({ id: id(), kind: 'files', files: c.files, text: c.files.join('\n'), at });
   if (c.text && c.text.length <= 20000) add({ id: id(), kind: 'text', text: c.text, at });
 }
 
 // ---- Windows' own clipboard history: off while Better Clipboard is on ----
 const reg = (args) => new Promise((res) => execFile('reg.exe', args, { windowsHide: true }, (e, out) => res(e ? null : String(out))));
-const readDword = async (key, name) => { const out = await reg(['query', key, '/v', name]); const m = out && out.match(/0x([0-9a-f]+)/i); return m ? parseInt(m[1], 16) : null; };
-async function windowsHistory(off) {
+const readDword = async (keyName, name) => { const out = await reg(['query', keyName, '/v', name]); const m = out && out.match(/0x([0-9a-f]+)/i); return m ? parseInt(m[1], 16) : null; };
+async function windowsHistory(off, seq) {
   if (process.platform !== 'win32') return;
+  if (off && (quitting || (seq != null && seq !== enableSeq))) return;
   const saved = await readDword(SAVED, 'ClipboardHistoryWas');
+  if (off && (quitting || (seq != null && seq !== enableSeq))) return;
   if (off) {
-    if (saved == null) await reg(['add', SAVED, '/v', 'ClipboardHistoryWas', '/t', 'REG_DWORD', '/d', String((await readDword(KEY, 'EnableClipboardHistory')) ?? 0), '/f']);
+    if (saved == null) {
+      const cur = (await readDword(KEY, 'EnableClipboardHistory')) ?? 0;
+      if (quitting || (seq != null && seq !== enableSeq)) return;
+      await reg(['add', SAVED, '/v', 'ClipboardHistoryWas', '/t', 'REG_DWORD', '/d', String(cur), '/f']);
+    }
+    if (quitting || (seq != null && seq !== enableSeq)) return;
     await reg(['add', KEY, '/v', 'EnableClipboardHistory', '/t', 'REG_DWORD', '/d', '0', '/f']);
   } else if (saved != null) {
     await reg(['add', KEY, '/v', 'EnableClipboardHistory', '/t', 'REG_DWORD', '/d', String(saved), '/f']);

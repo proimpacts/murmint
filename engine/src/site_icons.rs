@@ -24,14 +24,28 @@ enum Got {
 }
 
 async fn fetch(url: &str) -> Option<Got> {
-    let r = crate::CLIENT.get(url).timeout(Duration::from_secs(5)).send().await.ok()?;
-    if !r.status().is_success() {
+    const MAX_BYTES: usize = 300_000;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut r = tokio::time::timeout_at(
+        deadline,
+        crate::CLIENT.get(url).timeout(Duration::from_secs(5)).send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !r.status().is_success() || r.content_length().is_some_and(|n| n > MAX_BYTES as u64) {
         return None;
     }
     let base = r.url().to_string();
     let kind = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
-    let body = r.bytes().await.ok()?;
-    if body.is_empty() || body.len() > 300_000 {
+    let mut body = Vec::new();
+    while let Some(chunk) = tokio::time::timeout_at(deadline, r.chunk()).await.ok()?.ok()? {
+        if body.len().saturating_add(chunk.len()) > MAX_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if body.is_empty() {
         return None;
     }
     if kind.starts_with("text/html") {
