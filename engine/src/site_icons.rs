@@ -57,6 +57,12 @@ async fn load(host: &str) -> Option<String> {
 
 /// The site's icon as a data URL, or null.
 pub async fn icon(host: &str) -> Value {
+    if crate::session::LOCKED.load(std::sync::atomic::Ordering::Relaxed)
+        || crate::core::try_get()
+            .is_some_and(|c| c.store.lock().unwrap().config["privacy"]["localOnly"] == json!(true))
+    {
+        return Value::Null;
+    }
     let host = host.to_lowercase();
     if !valid(&host) {
         return Value::Null;
@@ -86,5 +92,51 @@ mod tests {
         assert!(!valid("127.0.0.1"));
         assert!(!valid("evil.com/path"));
         assert!(!valid("a..com"));
+    }
+
+    #[tokio::test]
+    async fn icon_returns_null_when_locked() {
+        let was = crate::session::LOCKED.swap(true, std::sync::atomic::Ordering::Relaxed);
+        let res = icon("github.com").await;
+        crate::session::LOCKED.store(was, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(res, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_oversized_content_length_and_streams() {
+        use tokio::io::AsyncWriteExt;
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = l.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = tokio::io::AsyncReadExt::read(&mut s, &mut buf).await;
+                    let req = String::from_utf8_lossy(&buf);
+                    if req.contains("/big-cl") {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 400000\r\nContent-Type: image/png\r\nConnection: close\r\n\r\n").await;
+                    } else if req.contains("/big-chunked") {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: image/png\r\nConnection: close\r\n\r\n").await;
+                        let chunk = vec![b'x'; 100_000];
+                        for _ in 0..4 {
+                            let hdr = format!("{:x}\r\n", chunk.len());
+                            if s.write_all(hdr.as_bytes()).await.is_err()
+                                || s.write_all(&chunk).await.is_err()
+                                || s.write_all(b"\r\n").await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        let _ = s.write_all(b"0\r\n\r\n").await;
+                    } else {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Type: image/png\r\nConnection: close\r\n\r\nPNG!").await;
+                    }
+                });
+            }
+        });
+        assert!(fetch(&format!("http://{addr}/big-cl")).await.is_none());
+        assert!(fetch(&format!("http://{addr}/big-chunked")).await.is_none());
+        assert!(matches!(fetch(&format!("http://{addr}/small")).await, Some(Got::Icon(_))));
     }
 }
