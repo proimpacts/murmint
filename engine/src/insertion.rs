@@ -234,13 +234,18 @@ pub async fn autotype() -> bool {
     if TEST_SINK.lock().unwrap().is_some() {
         return std::env::var("MURMINT_TEST_AUTOTYPE").is_ok_and(|v| v == "1");
     }
-    let probe = tokio::task::spawn_blocking(crate::native::focus_text_box);
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = cancelled.clone();
+    let probe = tokio::task::spawn_blocking(move || crate::native::focus_text_box_cancellable(flag));
     match tokio::time::timeout(std::time::Duration::from_millis(1500), probe).await {
         Ok(Ok(true)) => {
             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
             true
         }
-        _ => false,
+        _ => {
+            cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+            false
+        }
     }
 }
 

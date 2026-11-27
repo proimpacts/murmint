@@ -1002,7 +1002,13 @@ mod win {
     pub fn focus_editable() -> Option<bool> {
         None
     }
-    pub fn focus_text_box() -> bool {
+    pub fn capture_target() -> Option<super::TargetIdentity> {
+        None
+    }
+    pub fn matches_target(_: &super::TargetIdentity) -> bool {
+        true
+    }
+    pub fn focus_text_box_cancellable(_: &std::sync::atomic::AtomicBool) -> bool {
         false
     }
     pub fn browser_host() -> Option<String> {
@@ -1395,8 +1401,30 @@ pub fn site_for(exe: &str, title: &str) -> Option<String> {
     s
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetIdentity {
+    pub fg_hwnd: isize,
+    pub focus_hwnd: isize,
+    pub control_type: i32,
+    pub automation_id: String,
+    pub class_name: String,
+}
+
+pub fn capture_target() -> Option<TargetIdentity> {
+    win::capture_target()
+}
+
+pub fn matches_target(expected: &TargetIdentity) -> bool {
+    win::matches_target(expected)
+}
+
+pub fn focus_text_box_cancellable(cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>) -> bool {
+    win::focus_text_box_cancellable(&cancelled)
+}
+
+#[allow(dead_code)]
 pub fn focus_text_box() -> bool {
-    win::focus_text_box()
+    win::focus_text_box_cancellable(&std::sync::atomic::AtomicBool::new(false))
 }
 
 #[cfg(all(test, windows, local_tests))]
