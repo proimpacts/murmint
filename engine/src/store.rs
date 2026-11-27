@@ -865,7 +865,7 @@ mod tests {
             { "id": "1", "term": "FastAPI", "sounds": [], "note": "auto" }, { "id": "2", "term": "Siobhan", "sounds": [], "note": "edit" },
             { "id": "3", "term": "Kubernetes", "sounds": ["cooper nettys"], "note": "trained", "trained": true }, { "id": "4", "term": "Zed", "sounds": [], "note": "voice" } ],
             "termCounts": { "x": 3 }, "dismissed": ["y"] } }).to_string()).unwrap();
-        let s = Store::open(&d);
+        let mut s = Store::open(&d);
         let terms: Vec<&str> = s.config["personal"]["vocabulary"]
             .as_array()
             .unwrap()
