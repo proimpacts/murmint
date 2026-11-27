@@ -47,17 +47,26 @@ fn auto_layout(fmt: &Value, ctx: &Context) -> bool {
     fmt["autoLists"] == json!(true) && !ctx.terminal
 }
 
+fn effective_intensity(ctx: &Context) -> i64 {
+    if ctx.forced { ctx.intensity.max(1) } else { ctx.intensity }
+}
+
+fn should_vocab_ai_fix(cfg: &Value, ctx: &Context, local_only: bool, has_model: bool) -> bool {
+    !local_only && has_model && effective_intensity(ctx) > 0 && cfg["formatting"]["useAI"] != json!(false)
+}
+
 pub fn prep(cfg: &Value, has_model: bool, personal: &Value, raw: &str, ctx: &Context) -> Prep {
     let fmt = &cfg["formatting"];
     let ctx = ctx.clone();
     let raw = raw.to_string();
+    let eff_intensity = effective_intensity(&ctx);
     let style_id = ctx.style["id"].as_str().unwrap_or("").to_string();
     let formalize = style_id == "formal" || style_id == "professional";
     let single = smart::split_sentences(&raw).len() <= 1;
     let b = |k: &str, d: bool| fmt[k].as_bool().unwrap_or(d);
     let opts = text::local::LocalOpts {
         kind: ctx.kind.clone(),
-        intensity: ctx.intensity,
+        intensity: eff_intensity,
         language: cfg["dictation"]["language"].as_str().unwrap_or("auto").to_string(),
         remove_fillers: b("removeFillers", true),
         spoken_commands: b("spokenCommands", true),
@@ -70,14 +79,14 @@ pub fn prep(cfg: &Value, has_model: bool, personal: &Value, raw: &str, ctx: &Con
         expand_contractions: style_id == "formal",
         humanize: fmt["humanize"].as_str().unwrap_or("off").to_string(),
         excluded: strings(&fmt["excludedChars"]),
-        self_correct: true,
+        self_correct: eff_intensity > 0 && fmt["selfCorrection"] != json!(false),
     };
     let cleaned = local_format(&raw, &opts, personal);
     let verdict = if !cleaned.text.is_empty() {
         decide(&DecideIn {
             force: ctx.forced,
             signals: &cleaned.signals,
-            intensity: ctx.intensity,
+            intensity: eff_intensity,
             kind: &ctx.kind,
             style_id: &style_id,
             cfg,
@@ -214,6 +223,53 @@ struct Request {
     examples: Vec<(String, String)>,
     better: bool,
     rules: String,
+    has_instruction: bool,
+}
+
+fn is_builtin_app_instruction(instr: &str) -> bool {
+    let trimmed = instr.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    static BUILTINS: LazyLock<Vec<String>> = LazyLock::new(|| {
+        crate::store::defaults()["appProfiles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p["instruction"].as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    BUILTINS.iter().any(|b| b == trimmed)
+}
+
+fn effective_instruction<'a>(cfg: &Value, ctx: &'a Context, send_app: bool) -> &'a str {
+    let instr = ctx.instruction.trim();
+    if send_app || instr.is_empty() {
+        return &ctx.instruction;
+    }
+    if is_builtin_app_instruction(instr) {
+        return "";
+    }
+    if let Some(id) = ctx.profile_id.as_deref() {
+        let ov = &cfg["appOverrides"][id];
+        if ov["enabled"] == json!(false) {
+            return "";
+        }
+        let has_override_instr = ov["instruction"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty() && !is_builtin_app_instruction(s));
+        let is_custom_profile = cfg["appProfiles"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|p| p["id"] == id && p["custom"] == json!(true)));
+        if has_override_instr || is_custom_profile {
+            &ctx.instruction
+        } else {
+            ""
+        }
+    } else {
+        &ctx.instruction
+    }
 }
 
 // The system prompt and examples for one formatting request. Only the vocabulary, a spoken list and message context
@@ -221,10 +277,13 @@ struct Request {
 fn compose(cfg: &Value, ctx: &Context, vocabulary: &[String], wants_list: bool, has_context: bool) -> Request {
     let fmt = &cfg["formatting"];
     let privacy = &cfg["privacy"];
+    let send_app = privacy["sendAppContext"].as_bool().unwrap_or(true);
+    let app_name = if send_app { ctx.app_name.as_str() } else { "" };
+    let instruction = effective_instruction(cfg, ctx, send_app);
     let excluded = strings(&fmt["excludedChars"]);
     // rewritten prompts drift further from the input; loosen the checks
     let better = cfg["formatting"]["betterPrompts"] != json!(false)
-        && crate::prompt::is_ai_prompt(&ctx.kind, &ctx.app_name);
+        && crate::prompt::is_ai_prompt(&ctx.kind, app_name);
     // an app adds its own rules after the ones from Writing, or can be set to use only its own
     let app = ctx.profile_id.as_ref().map(|id| &cfg["appOverrides"][id]).unwrap_or(&Value::Null);
     let rules = if app["overrideRules"] == json!(true) {
@@ -236,8 +295,8 @@ fn compose(cfg: &Value, ctx: &Context, vocabulary: &[String], wants_list: bool, 
         style: &ctx.style,
         intensity: ctx.intensity,
         kind: &ctx.kind,
-        app_name: if privacy["sendAppContext"].as_bool().unwrap_or(true) { &ctx.app_name } else { "" },
-        instruction: &ctx.instruction,
+        app_name,
+        instruction,
         global_instruction: &rules,
         vocabulary,
         language: cfg["dictation"]["language"].as_str().unwrap_or("auto"),
@@ -270,7 +329,7 @@ ADVANCED PROMPTING: below is the end of the speaker's recent chat with their AI 
     if better {
         examples.push(crate::prompt::better_shot());
     }
-    Request { system, examples, better, rules }
+    Request { system, examples, better, rules, has_instruction: !instruction.trim().is_empty() }
 }
 
 // A model on this computer spends most of its time reading the prompt. Sending it while the person is still talking
@@ -300,7 +359,7 @@ pub fn warm(ctx: &Context) {
 pub async fn format(raw: &str, ctx: &Context, local_only: bool) -> FormatOut {
     let (cfg, personal, has_model) = snapshot();
     let fixed;
-    let raw = if !local_only && has_model && cfg["formatting"]["useAI"] != json!(false) {
+    let raw = if should_vocab_ai_fix(&cfg, ctx, local_only, has_model) {
         fixed = crate::vocab_ai::fix(raw).await;
         fixed.as_str()
     } else {
@@ -308,7 +367,7 @@ pub async fn format(raw: &str, ctx: &Context, local_only: bool) -> FormatOut {
     };
     let p = prep(&cfg, has_model, &personal, raw, ctx);
     let (fmt, cleaned, verdict, ctx) = (&cfg["formatting"], &p.cleaned, &p.verdict, &p.ctx);
-    let paragraphs = auto_layout(fmt, ctx) && ctx.intensity > 0;
+    let paragraphs = auto_layout(fmt, ctx) && effective_intensity(ctx) > 0;
     let lay_out = |t: &str| if paragraphs { smart::auto_paragraphs(t) } else { t.to_string() };
     let local = lay_out(&cleaned.text);
     let mut out = FormatOut {
@@ -345,7 +404,8 @@ pub async fn format(raw: &str, ctx: &Context, local_only: bool) -> FormatOut {
         cleaned.text.clone()
     };
     let excluded = strings(&fmt["excludedChars"]);
-    let Request { system, examples, better, rules } = compose(&cfg, ctx, &vocabulary, wants_list, !before.is_empty());
+    let Request { system, examples, better, rules, has_instruction } =
+        compose(&cfg, ctx, &vocabulary, wants_list, !before.is_empty());
     let user = wrap_user_ctx(&body, before);
     let tin = estimate_tokens(&system)
         + estimate_tokens(&user)
@@ -360,7 +420,13 @@ pub async fn format(raw: &str, ctx: &Context, local_only: bool) -> FormatOut {
         return out;
     }
 
-    let key = key_of(&[&system, &body, &refs.join(",")]);
+    let key = key_of(&[
+        &system,
+        &user,
+        &refs.join(","),
+        fmt["humanize"].as_str().unwrap_or("off"),
+        if p.formalize { "1" } else { "0" },
+    ]);
     if let Some(hit) = CACHE.lock().unwrap().get(&key).cloned() {
         out.text = hit;
         out.route = "cache".into();
@@ -380,7 +446,7 @@ pub async fn format(raw: &str, ctx: &Context, local_only: bool) -> FormatOut {
                 crate::prompt::sanitize_prompt(&r.text, &body)
             } else {
                 // a style or rule that rewrites words (abbreviations, slang) uses words the speaker never said
-                let restyled = !ctx.instruction.trim().is_empty() || !rules.is_empty() || ctx.style["rewrites"] == json!(true);
+                let restyled = has_instruction || !rules.is_empty() || ctx.style["rewrites"] == json!(true);
                 sanitize(&r.text, &body, concise || restyled, wants_list || ctx.intensity >= 3 || concise || restyled)
             };
             let Some(mut t) = checked else {
@@ -598,5 +664,112 @@ Don't:
                 "{kind}"
             );
         }
+    }
+
+    #[test]
+    fn verbatim_skips_ai_vocab_and_self_correct() {
+        let cfg = crate::store::defaults();
+        let p = json!({ "vocabulary": [{ "id": "1", "term": "OpenRouter", "sounds": [] }] });
+        let mut c = ctx("chat");
+        c.intensity = 0;
+        assert!(!should_vocab_ai_fix(&cfg, &c, false, true));
+
+        let out = prep(&cfg, true, &p, "see you at 5, no wait, 6", &c);
+        assert!(!out.verdict.ai);
+        assert_eq!(out.verdict.reason, "Verbatim mode");
+        assert!(out.cleaned.text.contains("no wait"), "{}", out.cleaned.text);
+
+        c.forced = true;
+        assert!(should_vocab_ai_fix(&cfg, &c, false, true));
+        let forced = prep(&cfg, true, &p, "see you at 5, no wait, 6", &c);
+        assert!(forced.verdict.ai);
+        assert!(forced.cleaned.text.to_lowercase().starts_with("see you at 6"), "{}", forced.cleaned.text);
+    }
+
+    #[test]
+    fn send_app_context_false_withholds_app_identity_and_builtin_instructions() {
+        let mut cfg = crate::store::defaults();
+        cfg["privacy"]["sendAppContext"] = json!(false);
+        for proc_name in ["Slack", "Discord", "Cursor"] {
+            let app_ctx = crate::profiles::resolve_context(&cfg, &json!({ "process": proc_name, "title": "" }));
+            let req = compose(&cfg, &app_ctx, &[], false, false);
+            let low = req.system.to_lowercase();
+            assert!(!req.system.contains("Where it is going ("), "{proc_name}: {}", req.system);
+            assert!(!req.system.contains("For this app:"), "{proc_name}: {}", req.system);
+            assert!(!low.contains("slack"), "{proc_name}: {}", req.system);
+            assert!(!low.contains("discord"), "{proc_name}: {}", req.system);
+            assert!(!low.contains("ai code editor"), "{proc_name}: {}", req.system);
+            if proc_name == "Cursor" {
+                assert!(!req.better, "Cursor should not trigger betterPrompts when sendAppContext is false");
+            }
+        }
+
+        // Custom user profile and user-overridden instruction still apply when non-builtin
+        cfg["appProfiles"].as_array_mut().unwrap().push(json!({
+            "id": "app-custom-notes",
+            "name": "MyNotes",
+            "process": ["mynotes"],
+            "title": [],
+            "kind": "document",
+            "style": "natural",
+            "intensity": null,
+            "instruction": "Keep notes concise and scannable.",
+            "custom": true
+        }));
+        let custom_ctx = crate::profiles::resolve_context(&cfg, &json!({ "process": "mynotes", "title": "" }));
+        let custom_req = compose(&cfg, &custom_ctx, &[], false, false);
+        assert!(custom_req.system.contains("Keep notes concise and scannable."));
+        assert!(!custom_req.system.contains("MyNotes"));
+
+        cfg["appOverrides"] = json!({ "slack": { "instruction": "Keep it to two lines." } });
+        let slack_ov_ctx = crate::profiles::resolve_context(&cfg, &json!({ "process": "Slack", "title": "" }));
+        let slack_ov_req = compose(&cfg, &slack_ov_ctx, &[], false, false);
+        assert!(slack_ov_req.system.contains("Keep it to two lines."));
+        assert!(!slack_ov_req.system.to_lowercase().contains("slack"));
+
+        cfg["privacy"]["sendAppContext"] = json!(true);
+        cfg["appOverrides"] = json!({});
+        let slack_on = compose(
+            &cfg,
+            &crate::profiles::resolve_context(&cfg, &json!({ "process": "Slack", "title": "" })),
+            &[],
+            false,
+            false,
+        );
+        let discord_on = compose(
+            &cfg,
+            &crate::profiles::resolve_context(&cfg, &json!({ "process": "Discord", "title": "" })),
+            &[],
+            false,
+            false,
+        );
+        assert!(slack_on.system.contains("Slack"));
+        assert!(discord_on.system.contains("Discord"));
+    }
+
+    #[test]
+    fn cache_key_distinguishes_context_and_humanize_levels() {
+        let mut cfg = crate::store::defaults();
+        let c = ctx("chat");
+        cfg["formatting"]["humanize"] = json!("light");
+        let req_light = compose(&cfg, &c, &[], false, true);
+        cfg["formatting"]["humanize"] = json!("strong");
+        let req_strong = compose(&cfg, &c, &[], false, true);
+        assert_eq!(req_light.system, req_strong.system);
+
+        let u_comma = wrap_user_ctx("can we meet tomorrow", "Hi Alice,");
+        let u_dot = wrap_user_ctx("can we meet tomorrow", "Hi Alice.");
+        assert_ne!(
+            key_of(&[&req_light.system, &u_comma, "openai::gpt-5.4-nano", "light", "0"]),
+            key_of(&[&req_light.system, &u_dot, "openai::gpt-5.4-nano", "light", "0"])
+        );
+        assert_ne!(
+            key_of(&[&req_light.system, &u_comma, "openai::gpt-5.4-nano", "light", "0"]),
+            key_of(&[&req_strong.system, &u_comma, "openai::gpt-5.4-nano", "strong", "0"])
+        );
+        assert_ne!(
+            key_of(&[&req_light.system, &u_comma, "openai::gpt-5.4-nano", "strong", "0"]),
+            key_of(&[&req_light.system, &u_comma, "openai::gpt-5.4-nano", "strong", "1"])
+        );
     }
 }
