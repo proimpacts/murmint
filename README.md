@@ -73,6 +73,15 @@ These are the models Murmint makes itself. For formatting, and for speech if you
 |---|---|---|
 | **Murmint 1** | Turns your voice into text on your own PC. Free, private and works offline. Built on OpenAI's [Whisper](https://github.com/openai/whisper) Tiny, run by [whisper.cpp](https://github.com/ggml-org/whisper.cpp). | The default speech model |
 
+## Contributors
+
+The people who have built and improved Murmint. Pull requests are welcome; if one is merged, you're added here.
+
+| Contributor | What they did |
+|---|---|
+| [proimpacts](https://github.com/proimpacts) | Created Murmint: design, direction, testing and most of the code |
+| [lilsnibbi](https://github.com/lilsnibbi) | [#1](https://github.com/proimpacts/murmint/pull/1): fixed bugs across privacy, dictation, text insertion, the clipboard, formatting, providers, the installer and data safety, and added automated tests |
+
 ## License
 
 [GPL-3.0](LICENSE)
