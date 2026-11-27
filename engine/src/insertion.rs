@@ -115,28 +115,37 @@ mod clip {
                 if *fmt >= 0xC000 && is_marker(*fmt) {
                     continue;
                 }
-                set_raw(*fmt, bytes);
+                let _ = set_raw(*fmt, bytes);
             }
             keep_out_of_history();
+            crate::clipboard::suppress_capture(350);
             let _ = CloseClipboard();
         }
     }
 
-    unsafe fn set_raw(fmt: u32, bytes: &[u8]) {
-        if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) {
-            let p = GlobalLock(h);
-            if !p.is_null() {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
-                let _ = GlobalUnlock(h);
-                let _ = SetClipboardData(fmt, HANDLE(h.0));
-            }
+    unsafe fn set_raw(fmt: u32, bytes: &[u8]) -> bool {
+        let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) else {
+            return false;
+        };
+        let p = GlobalLock(h);
+        if p.is_null() {
+            let _ = GlobalFree(h);
+            return false;
         }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+        let _ = GlobalUnlock(h);
+        if SetClipboardData(fmt, HANDLE(h.0)).is_err() {
+            let _ = GlobalFree(h);
+            return false;
+        }
+        true
     }
 
     pub fn clear() {
         if open() {
             unsafe {
                 let _ = EmptyClipboard();
+                crate::clipboard::suppress_capture(350);
                 let _ = CloseClipboard();
             }
         }
@@ -157,18 +166,22 @@ mod clip {
             return false;
         }
         unsafe {
-            let _ = EmptyClipboard();
+            if EmptyClipboard().is_err() {
+                let _ = CloseClipboard();
+                return false;
+            }
             // Windows text boxes only show a line break written as CRLF
             let mut wide: Vec<u16> = text.replace("\r\n", "\n").replace('\n', "\r\n").encode_utf16().collect();
             wide.push(0);
             let bytes: Vec<u8> = wide.iter().flat_map(|w| w.to_le_bytes()).collect();
-            set_raw(CF_UNICODETEXT, &bytes);
-            if private {
+            let ok = set_raw(CF_UNICODETEXT, &bytes);
+            if ok && private {
                 keep_out_of_history();
             }
+            crate::clipboard::suppress_capture(350);
             let _ = CloseClipboard();
+            ok
         }
-        true
     }
 
     pub fn read_text() -> Option<String> {

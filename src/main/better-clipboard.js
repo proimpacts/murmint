@@ -1,10 +1,11 @@
 'use strict';
 // Better Clipboard: what you copy (never what Murmint dictates), plus emojis and GIFs, in an overlay that Win+V opens.
 // While it is on, Windows' own clipboard history is switched off; the setting it had is kept and put back when
-// Better Clipboard is turned off, and by the uninstaller.
+// Better Clipboard is turned off, when Murmint quits, and by the uninstaller.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const { app, BrowserWindow, clipboard, nativeImage, net, screen } = require('electron');
 
 const MAX = 60; // unpinned items kept
@@ -187,10 +188,30 @@ async function windowsHistory(off, seq) {
   }
 }
 
+function restoreOsHistorySync() {
+  quitting = true;
+  ++enableSeq;
+  if (process.platform !== 'win32') return false;
+  try {
+    const out = String(execFileSync('reg.exe', ['query', SAVED, '/v', 'ClipboardHistoryWas'], { windowsHide: true, encoding: 'utf8' }));
+    const m = out.match(/0x([0-9a-f]+)/i);
+    if (!m) return false;
+    const saved = parseInt(m[1], 16);
+    execFileSync('reg.exe', ['add', KEY, '/v', 'EnableClipboardHistory', '/t', 'REG_DWORD', '/d', String(saved), '/f'], { windowsHide: true });
+    execFileSync('reg.exe', ['delete', SAVED, '/v', 'ClipboardHistoryWas', '/f'], { windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function enable(engine, on) {
+  if (quitting) return;
+  const seq = ++enableSeq;
   core = engine;
   await core.ui('clipboard:enable', !!on).catch(() => {});
-  await windowsHistory(!!on);
+  if (quitting || seq !== enableSeq) return;
+  await windowsHistory(!!on, seq);
   if (!on && win && !win.isDestroyed()) win.hide();
 }
 
@@ -278,14 +299,17 @@ function remove(itemId) {
   const i = load().findIndex((x) => x.id === itemId);
   if (i < 0) return;
   const [x] = items.splice(i, 1);
-  if (x.kind === 'image' || x.kind === 'gif') fs.rm(x.file, { force: true }, () => {});
+  if ((x.kind === 'image' || x.kind === 'gif') && x.file) { try { fs.unlinkSync(x.file); } catch { } }
   save();
 }
 function clear() {
-  for (const x of load().filter((i) => !i.pinned && (i.kind === 'image' || i.kind === 'gif'))) fs.rm(x.file, { force: true }, () => {});
+  for (const x of load().filter((i) => !i.pinned && (i.kind === 'image' || i.kind === 'gif') && i.file)) {
+    try { fs.unlinkSync(x.file); } catch { }
+  }
   items = load().filter((i) => i.pinned);
+  sweepOrphans();
   save();
 }
 function close() { if (win && !win.isDestroyed()) win.hide(); }
 
-module.exports = { enable, copied, open, pick, pin, remove, clear, close, drag, list: load };
+module.exports = { enable, copied, open, pick, pin, remove, clear, close, drag, list: load, restoreOsHistorySync, sweepOrphans };
