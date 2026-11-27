@@ -18,11 +18,36 @@ pub struct Cand<'a> {
     pub model: &'a Value,
 }
 
+fn url_host(url: &str) -> String {
+    let trimmed = url.trim().to_ascii_lowercase();
+    if let Ok(u) = reqwest::Url::parse(&trimmed) {
+        return u.host_str().unwrap_or("").to_string();
+    }
+    let after = trimmed.split("://").nth(1).unwrap_or(&trimmed);
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    if host_port == "::1" {
+        return "::1".to_string();
+    }
+    if host_port.starts_with('[') {
+        host_port.find(']').map(|i| host_port[..=i].to_string()).unwrap_or_default()
+    } else {
+        host_port.split(':').next().unwrap_or("").to_string()
+    }
+}
+
 /// A provider running on this PC (Murmint 1, Ollama, LM Studio, a local server), judged by its address.
 pub fn on_this_pc(p: &Value) -> bool {
-    let base = p["baseUrl"].as_str().unwrap_or("").to_lowercase();
-    let host = base.split("://").nth(1).unwrap_or(&base).split(['/', ':']).next().unwrap_or("");
-    p["local"] == json!(true) || matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0")
+    if p["type"] == "cloudflare" {
+        return false;
+    }
+    let base = p["baseUrl"].as_str().unwrap_or("").trim();
+    let host = url_host(base);
+    let loopback = matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1");
+    if p["id"] == "murmint-local" || p["local"] == json!(true) {
+        return base.is_empty() || loopback;
+    }
+    loopback
 }
 
 pub fn candidates<'a>(store: &'a Store, task: &str) -> Vec<Cand<'a>> {

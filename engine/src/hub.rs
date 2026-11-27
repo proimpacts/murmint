@@ -150,12 +150,16 @@ pub async fn chat(
 pub fn prewarm(r: &str) {
     let url = {
         let s = core::get().store.lock().unwrap();
-        s.find_model(r).map(|(p, _)| {
-            if p["type"] == "cloudflare" {
+        let local_only = s.config["privacy"]["localOnly"] == json!(true);
+        s.find_model(r).and_then(|(p, _)| {
+            if local_only && !crate::route::on_this_pc(p) {
+                return None;
+            }
+            Some(if p["type"] == "cloudflare" {
                 "https://api.cloudflare.com/".to_string()
             } else {
                 p["baseUrl"].as_str().unwrap_or("").to_string()
-            }
+            })
         })
     };
     if let Some(url) = url.filter(|u| !u.is_empty()) {

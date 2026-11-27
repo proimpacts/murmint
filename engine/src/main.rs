@@ -154,8 +154,25 @@ fn cf_base(account: &str) -> String {
     format!("https://api.cloudflare.com/client/v4/accounts/{}/ai", account.trim())
 }
 fn on_device_url(url: &str) -> bool {
-    let host = url.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("");
-    matches!(host, "127.0.0.1" | "localhost")
+    let Ok(parsed) = reqwest::Url::parse(url.trim()) else {
+        return false;
+    };
+    matches!(
+        parsed.host_str().map(str::to_ascii_lowercase).as_deref(),
+        Some("127.0.0.1" | "localhost" | "[::1]")
+    )
+}
+fn local_only_enabled() -> bool {
+    core::try_get().is_some_and(|c| c.store.lock().unwrap().config["privacy"]["localOnly"] == json!(true))
+}
+fn check_local_only(url: &str) -> Result<(), PErr> {
+    if local_only_enabled() && !on_device_url(url) {
+        return Err(PErr {
+            message: "Blocked non-local request while local-only mode is enabled.".into(),
+            kind: "error",
+        });
+    }
+    Ok(())
 }
 
 // Models on this computer run on the CPU, so they get more time than a cloud API.
@@ -207,6 +224,7 @@ async fn stt_once(
     });
     if c.ptype == "cloudflare" {
         let url = format!("{}/run/{}", cf_base(&c.account_id), c.model);
+        check_local_only(&url)?;
         let req = CLIENT.post(url).bearer_auth(&c.key).timeout(timeout);
         let req = if c.model.contains("whisper-large-v3-turbo") {
             let audio = base64::engine::general_purpose::STANDARD.encode(wav);
@@ -272,6 +290,7 @@ async fn anthropic_chat(
     timeout: Duration,
 ) -> Result<(String, Option<u64>, Option<u64>), PErr> {
     let url = format!("{}/messages", chat_base(c));
+    check_local_only(&url)?;
     let mut messages = vec![];
     for (u, a) in shots {
         messages.push(json!({"role": "user", "content": u}));
@@ -341,6 +360,8 @@ async fn chat_once(
         return anthropic_chat(c, system, user, shots, max_out, timeout).await;
     }
     let base = chat_base(c);
+    let url = format!("{base}/chat/completions");
+    check_local_only(&url)?;
     let m = &c.model;
     let reasoning = c.ptype == "openai"
         && (m.starts_with("gpt-5")
@@ -494,6 +515,9 @@ pub(crate) async fn handle(req: Value) -> Value {
         "prewarm" => {
             let url = req["url"].as_str().unwrap_or("").to_string();
             if !url.is_empty() {
+                if let Err(e) = check_local_only(&url) {
+                    return json!({ "id": id, "ok": false, "error": e.message });
+                }
                 let _ = CLIENT.head(url).timeout(Duration::from_secs(4)).send().await;
             }
             json!({ "id": id, "ok": true })
@@ -504,8 +528,12 @@ pub(crate) async fn handle(req: Value) -> Value {
             let Some(c) = cands.first() else {
                 return json!({ "id": id, "ok": false, "error": "No provider given" });
             };
+            let url = format!("{}/models", chat_base(c));
+            if let Err(e) = check_local_only(&url) {
+                return json!({ "id": id, "ok": false, "error": e.message });
+            }
             let t = std::time::Instant::now();
-            let mut r = CLIENT.get(format!("{}/models", chat_base(c))).timeout(Duration::from_secs(10));
+            let mut r = CLIENT.get(url).timeout(Duration::from_secs(10));
             if c.ptype == "anthropic" {
                 r = r.header("x-api-key", &c.key).header("anthropic-version", "2023-06-01");
             } else if !c.key.is_empty() {
