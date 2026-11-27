@@ -52,6 +52,7 @@ You'll need Node.js 20+, Rust and the Visual Studio C++ build tools.
 
 ```bash
 npm install
+npm run engine  # build the Rust engine (also runs automatically before npm start if missing)
 npm start       # run it
 npm run dist    # make the installer
 ```

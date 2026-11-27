@@ -6,14 +6,13 @@
   "main": "src/main/main.js",
   "author": "Murmint",
   "scripts": {
+    "prestart": "node scripts/ensure-engine.js",
     "start": "electron .",
     "test": "node --test test/recorder.test.js && cargo test --manifest-path engine/Cargo.toml",
+    "test:js": "node --test test/recorder.test.js",
     "icons": "node scripts/make-icons.js",
-    "e2e": "node scripts/e2e.js",
     "dist": "npm run engine && electron-builder --win && node scripts/build-installer.js",
     "engine": "node scripts/build-engine.js",
-    "e2e:live": "node scripts/e2e-live.js",
-    "e2e:vocab": "node scripts/e2e-vocab.js",
     "installerart": "electron scripts/make-installer-art.js"
   },
   "devDependencies": {
