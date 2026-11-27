@@ -129,9 +129,25 @@
       if (isCustom()) p.name = name.value.trim();
       if (url.value.trim() || !p.baseUrl) p.baseUrl = base();
       if (preset.key === 'cloudflare') p.accountId = acct.value.trim();
+      const prevModels = p.models || [];
+      const chosenIds = new Set(models.map((m) => m.id));
+      const removedModels = new Set(p.removedModels || []);
+      for (const m of prevModels) if (!chosenIds.has(m.id)) removedModels.add(m.id);
+      for (const id of chosenIds) removedModels.delete(id);
       p.models = models;
+      p.removedModels = [...removedModels];
       await api.saveProvider(p);
-      if (k) await api.setKey(p.id, k);
+      if (k) {
+        const kr = await api.setKey(p.id, k);
+        if (kr === false || (kr && kr.ok === false)) {
+          const msg = kr?.error || 'Could not save API key.';
+          say(msg, 'bad');
+          UI.toast?.(msg, 'error');
+          existing = p;
+          refresh();
+          return;
+        }
+      }
       // only the models picked here are listed on the page
       await api.set('shownModels', [...(App.cfg().shownModels || []).filter((r) => !r.startsWith(p.id + '::')), ...models.map((m) => `${p.id}::${m.id}`)]);
       if (!test) { close(); UI.toast(`${p.name} saved`, 'ok'); refresh(); return; }
