@@ -1193,6 +1193,7 @@ pub fn private_memory_mb(pid: u32) -> f64 {
 
 static SEEN: LazyLock<Mutex<Option<(String, String, Option<String>)>>> = LazyLock::new(|| Mutex::new(None));
 
+#[allow(dead_code)]
 pub fn start_site_watch(on_site: impl Fn(String) + Send + 'static) {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {

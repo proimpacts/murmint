@@ -730,13 +730,6 @@ async fn main() {
                         session::init();
                         native::start_hotkeys(session::on_hotkey_event);
                         clipboard::start(|ch, v| core::push(ch, "shell", v));
-                        // fetch the icon of each site as it is seen, so it is ready when the pill or History asks
-                        let rt = tokio::runtime::Handle::current();
-                        native::start_site_watch(move |site| {
-                            rt.spawn(async move {
-                                site_icons::icon(&site).await;
-                            });
-                        });
                         tokio::spawn(murmint1::boot());
                         static UPDATES: std::sync::Once = std::sync::Once::new();
                         UPDATES.call_once(updater::start);
