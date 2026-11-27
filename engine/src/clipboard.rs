@@ -163,7 +163,11 @@ mod win {
                 let f = RegisterClipboardFormatW(windows::core::PCWSTR(name.as_ptr()));
                 f != 0 && IsClipboardFormatAvailable(f).is_ok()
             });
-            if private {
+            let history_fmt = RegisterClipboardFormatW(windows::core::w!("CanIncludeInClipboardHistory"));
+            let history_blocked = history_fmt != 0
+                && IsClipboardFormatAvailable(history_fmt).is_ok()
+                && super::history_blocked_by_bytes(bytes(history_fmt).as_deref());
+            if private || history_blocked {
                 None
             } else {
                 let html_fmt = RegisterClipboardFormatW(windows::core::w!("HTML Format"));
@@ -310,5 +314,27 @@ mod tests {
         assert_eq!(gif_in_html(r#"<img src="https://example.com/photo.png">"#), None);
         assert_eq!(gif_in_html(r#"<img src="http://example.com/insecure.gif">"#), None);
         assert_eq!(gif_in_html("<p>no picture</p>"), None);
+    }
+
+    #[test]
+    fn unicode_html_does_not_panic_and_finds_gifs() {
+        assert_eq!(
+            gif_in_html("İ<img src=\"https://example.com/a.gif\">").as_deref(),
+            Some("https://example.com/a.gif")
+        );
+        assert_eq!(
+            gif_in_html("KK<img src=\"https://example.com/b.gif\">").as_deref(),
+            Some("https://example.com/b.gif")
+        );
+        assert_eq!(gif_in_html("İK<IMG ALT=\"İ\" SRC='https://example.com/c.GIF?v=1'>").as_deref(), Some("https://example.com/c.GIF?v=1"));
+        assert_eq!(gif_in_html("İ<img src=\"https://example.com/"), None);
+    }
+
+    #[test]
+    fn history_exclusion_bytes_block_zero_and_malformed_values() {
+        assert!(history_blocked_by_bytes(None));
+        assert!(history_blocked_by_bytes(Some(&[0, 0])));
+        assert!(history_blocked_by_bytes(Some(&0u32.to_le_bytes())));
+        assert!(!history_blocked_by_bytes(Some(&1u32.to_le_bytes())));
     }
 }
