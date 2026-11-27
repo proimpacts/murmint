@@ -23,50 +23,74 @@
 
   const rec = new Recorder({
     onLevel: (rms) => { lvl = Math.min(1, rms * 9); },
-    onSegment: (seg) => api.sendSegment(seg),
-    onPreview: (p) => api.sendPreview(p),
-    onCaption: () => {},
-    onChunk: (buf) => api.sendChunk(buf),
-    onBoundary: (b) => api.sendBoundary(b),
-    onAutoStop: () => api.sendAutoStop(),
-    onError: (m) => api.recError(m),
+    onSegment: api.sendSegment,
+    onPreview: api.sendPreview,
+    onCaption: (text) => showCaption(text),
+    onChunk: api.sendChunk,
+    onBoundary: api.sendBoundary,
+    onAutoStop: api.sendAutoStop,
+    onError: api.recError,
   });
-  let chain = Promise.resolve();
-  api.on('rec:cmd', ({ cmd, opts }) => {
-    chain = chain.then(async () => {
-      if (cmd === 'start') { sounds = opts.sounds; await rec.start(opts); }
-      else if (cmd === 'stop') rec.stop();
+  let chain = Promise.resolve(), activeCapture;
+  api.on('rec:cmd', ({ cmd, opts, captureId }) => {
+    if (cmd === 'reset' || cmd === 'cancel') {
+      activeCapture = undefined;
+      chain = Promise.resolve();
+      rec.cancel();
+      return;
+    }
+    if (cmd === 'start') {
+      activeCapture = captureId;
+      sounds = opts.sounds;
+      chain = rec.start({ ...opts, captureId });
+      return;
+    }
+    chain = chain.then(() => {
+      if (captureId !== activeCapture) return;
+      if (cmd === 'stop') rec.stop();
       else if (cmd === 'pause') rec.pause();
       else if (cmd === 'resume') rec.resume();
-      else if (cmd === 'cancel') rec.cancel();
-    }).catch((e) => api.recError(String((e && e.message) || e)));
+    }).catch((e) => api.recError(captureId, String(e.message || e)));
   });
 
   let hideTimer = 0, pinnedText = '';
   const DONE_MS = 1200;
   const PINNED_MS = 10 * 60 * 1000;
-  function showFor(msg, ms, copyable = false) {
+  function showFor(msg, ms, copyable = false, label = '') {
     clearTimeout(hideTimer); hideTimer = 0;
-    say(msg, copyable);
+    say(msg, copyable, label);
     if (msg) hideTimer = setTimeout(() => { hideTimer = 0; say(''); }, ms);
   }
+  function showCaption(text) {
+    if (state === 'listening' && text) label.textContent = short(text.slice(-300));
+  }
+  api.on('overlay:caption', (p) => { if (p.sid === sid) showCaption(p.text); });
   const MAX_WORDS = 12;
   const short = (t) => { const w = String(t).trim().split(/\s+/); return w.length > MAX_WORDS ? w.slice(0, MAX_WORDS).join(' ') + '…' : String(t).trim(); };
-  function say(msg, copyable = false) {
+  function say(msg, copyable = false, label = '') {
     const wasPinned = !!pinnedText;
     pinnedText = msg && copyable ? msg : '';
     bacts.hidden = !pinnedText;
     bubble.classList.toggle('pinned', !!pinnedText);
     if (wasPinned !== !!pinnedText) api.overlayPin(!!pinnedText);
     if (!msg) { bubble.classList.remove('on'); api.overlayHover(false); return; }
-    btext.textContent = short(msg); bubble.classList.add('on');
+    btext.textContent = label ? `${label}: ${short(msg)}` : short(msg); bubble.classList.add('on');
     btext.scrollTop = btext.scrollHeight;
     btext.classList.toggle('long', btext.scrollHeight > btext.clientHeight + 1);
   }
   bcopy.addEventListener('click', async () => {
     if (!pinnedText) return;
-    try { await api.copyText(pinnedText); bcopy.textContent = 'Copied'; } catch { bcopy.textContent = 'Could not copy'; }
-    setTimeout(() => { bcopy.textContent = 'Copy'; showFor('', 0); }, 700);
+    let ok = false;
+    try { ok = (await api.copyText(pinnedText)) === true; } catch { ok = false; }
+    if (ok) {
+      bcopy.textContent = 'Copied';
+      setTimeout(() => { bcopy.textContent = 'Copy'; showFor('', 0); }, 700);
+  
+    } else {
+      bcopy.textContent = 'Clipboard busy — try again';
+      setTimeout(() => { bcopy.textContent = 'Copy'; }, 1800);
+    }
+
   });
   bdismiss.addEventListener('click', () => showFor('', 0));
 

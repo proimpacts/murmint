@@ -22,21 +22,24 @@
     bubble.style.transformOrigin = `${cx - x}px ${side === 'down' ? h : 0}px`;
   }
 
-  function show({ target, text, at, theme, accent }) {
+  function show({ target, text, at, theme, accent, truncated }) {
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.accent = accent || 'ember';
     const bubble = make('div', 'bubble'), tail = make('i', 'tail');
     const copy = make('button', 'btn', 'Copy'), dismiss = make('button', 'btn ghost', 'Dismiss');
     copy.type = dismiss.type = 'button';
     copy.addEventListener('click', async () => {
-      try { await api.copyText(text); copy.textContent = 'Copied'; } catch { copy.textContent = 'Could not copy'; }
-      setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
+      let ok = false;
+      try { ok = (await api.copyText(text)) === true; } catch { ok = false; }
+      copy.textContent = ok ? 'Copied' : 'Clipboard busy — try again';
+      setTimeout(() => { copy.textContent = 'Copy'; }, ok ? 1400 : 1800);
     });
     dismiss.addEventListener('click', close);
     const acts = make('div', 'acts');
     acts.append(copy, dismiss);
     const head = make('div', 'head');
-    head.append(make('span', 'label', `Translated to ${target}`), acts);
+    const heading = truncated ? `Translated to ${target} · Long selection shortened` : `Translated to ${target}`;
+    head.append(make('span', 'label', heading), acts);
     bubble.append(head, make('div', 'text', text), tail);
     layer.append(bubble);
     place(bubble, tail, at);

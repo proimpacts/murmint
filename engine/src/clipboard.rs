@@ -116,7 +116,9 @@ pub fn start(emit: impl Fn(&str, Value) + Send + Sync + 'static) {
 /// Puts files on the clipboard the way Explorer does when you copy them, so pasting a GIF sends the GIF itself.
 pub fn write_files(paths: &[String]) -> bool {
     let ok = win::write_files(paths);
-    mark_own();
+    if ok {
+        mark_own();
+    }
     ok
 }
 
@@ -130,12 +132,12 @@ mod win {
     use serde_json::{json, Value};
     use std::sync::atomic::Ordering;
     use std::sync::OnceLock;
-    use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::DataExchange::{
-        CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard,
-        RegisterClipboardFormatW,
+        CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+        OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
     };
-    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetForegroundWindow, GetMessageW, SetForegroundWindow, SetWindowsHookExW, KBDLLHOOKSTRUCT,
