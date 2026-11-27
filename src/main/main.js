@@ -90,6 +90,7 @@ function applySideEffects() {
   try { app.setLoginItemSettings({ openAtLogin: !!cfg.general.launchAtLogin, args: ['--hidden'] }); } catch { }
 }
 
+let capture = null, captureId = 0;
 function wireCore() {
   core.on('push', ({ ch, to, payload }) => {
     if (ch === 'state:changed') { shell.state = payload; shell.config = payload.config; shell.session = payload.session || shell.session; }
@@ -99,6 +100,12 @@ function wireCore() {
     if (ch === 'translate:show') { translateView.show({ ...payload, accent: shell.config && shell.config.appearance.accent }).catch(() => {}); return; }
     if (ch === 'clipboard:copied') { betterClipboard.copied(payload); return; }
     if (ch === 'clipboard:open') { if (isOpen()) betterClipboard.open(payload && payload.hwnd, payload && payload.tab); return; }
+    if (ch === 'rec:cmd') {
+      if (payload.cmd === 'start') capture = { sid: payload.sid, id: ++captureId };
+      if (payload.cmd === 'reset' || payload.cmd === 'cancel') capture = null;
+      windows?.toOverlay(ch, { ...payload, captureId: capture?.id });
+      return;
+    }
     if (ch === 'overlay:state') {
       shell.session = { state: payload.state, mode: payload.mode };
       if (payload.state === 'idle') trimSoon(6000);
@@ -110,7 +117,17 @@ function wireCore() {
     else if (to === 'main') windows.toMain(ch, payload);
     else if (to === 'overlay') windows.toOverlay(ch, payload);
   });
-  core.on('down', () => windows && windows.toMain('toast', { kind: 'error', message: 'The Murmint engine stopped. Restarting it…' }));
+  core.on('down', () => {
+    capture = null;
+    shell.session = { state: 'idle', mode: null };
+    if (!windows || windows.quitting) return;
+    windows.toOverlay('rec:cmd', { cmd: 'reset' });
+    windows.toOverlay('overlay:state', { state: 'idle', reset: true });
+    windows.pinned = false;
+    windows.syncOverlay(false);
+    windows.toMain('toast', { kind: 'error', message: 'The Murmint engine stopped. Restarting it…' });
+  });
+  core.on('restarted', () => gate());
 }
 
 const b64 = (b) => Buffer.from(b).toString('base64');
@@ -160,12 +177,20 @@ function wireIpc() {
   ipcMain.handle('clipboard:drag', (_e, on) => betterClipboard.drag(!!on));
   ipcMain.handle('clipboard:enable', (_e, on) => { store.set('clipboard.enabled', !!on); return betterClipboard.enable(core, !!on && isOpen()); });
   ipcMain.handle('vocab:train', (_e, t) => core.ui('vocab:train', { wav_b64: b64(t.wav), durationSec: t.durationSec, term: t.term }));
-  ipcMain.handle('rec:preview', (_e, p) => core.ui('rec:preview', { wav_b64: b64(p.wav), durationSec: p.durationSec }));
-  ipcMain.on('rec:segment', (_e, seg) => core.send('rec:segment', { wav_b64: b64(seg.wav), durationSec: seg.durationSec, peak: seg.peak, final: !!seg.final, gapMs: seg.gapMs ?? null }));
-  ipcMain.on('rec:chunk', (_e, buf) => core.send('rec:chunk', b64(buf)));
-  ipcMain.on('rec:boundary', (_e, b) => core.send('rec:boundary', b));
-  ipcMain.on('rec:autostop', () => core.send('rec:autostop'));
-  ipcMain.on('rec:error', (_e, message) => core.send('rec:error', message));
+  const recorderSid = (e, id) => e.sender === windows.overlay?.webContents && capture && capture.id === id ? capture.sid : null;
+  ipcMain.handle('rec:preview', (e, id, p) => {
+    const sid = recorderSid(e, id);
+    return sid === null ? '' : core.ui('rec:preview', { wav_b64: b64(p.wav), durationSec: p.durationSec }, sid);
+  });
+  const recorderEvent = (channel, encode = (value) => value) => ipcMain.on(channel, (e, id, value) => {
+    const sid = recorderSid(e, id);
+    if (sid !== null) core.send(channel, encode(value), sid);
+  });
+  recorderEvent('rec:segment', (seg) => ({ wav_b64: b64(seg.wav), durationSec: seg.durationSec, peak: seg.peak, final: !!seg.final, gapMs: seg.gapMs ?? null }));
+  recorderEvent('rec:chunk', b64);
+  recorderEvent('rec:boundary');
+  recorderEvent('rec:autostop');
+  recorderEvent('rec:error');
   ipcMain.handle('win:action', (e, a) => {
     const w = BrowserWindow.fromWebContents(e.sender);
     if (!w) return;

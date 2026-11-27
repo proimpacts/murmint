@@ -7,7 +7,7 @@
   const N = 5;
   const dots = Array.from({ length: N }, () => dotsEl.appendChild(document.createElement('i')));
 
-  let state = 'idle', prevState = 'idle', sounds = true, lvl = 0, smooth = 0;
+  let state = 'idle', sid, prevState = 'idle', sounds = true, lvl = 0, smooth = 0;
 
   let ac;
   function blip(freq, dur = 0.08, vol = 0.04) {
@@ -140,6 +140,7 @@
   let poofTimer = 0, foldTimer = 0, folding = false;
   function render(s) {
     state = s.state;
+    sid = s.sid;
     stage.dataset.state = state === 'idle' ? 'idle' : 'on';
     const attached = document.documentElement.dataset.pill === 'attached';
     pill.dataset.state = state;
@@ -174,11 +175,12 @@
     if (state === 'listening' && s.starting) blip(660);
     if (state === 'processing' && prevState === 'listening') blip(440);
     if (state === 'success') {
-      if (s.copy && s.text) showFor(s.text, PINNED_MS, true);
+      if (s.copy && s.text) showFor(s.text, PINNED_MS, true, s.message ? 'Partial transcript' : '');
       else showFor(s.text || s.message || '', s.text ? DONE_MS : 2500);
       blip(880, 0.1, 0.035);
     }
     if (state === 'error') { showFor(s.message || 'Something went wrong', 3800); blip(220, 0.14, 0.05); }
+    if (s.reset) showFor('', 0);
     if (state === 'idle' && !hideTimer) say('');
     prevState = state;
     if (state === 'listening' || state === 'processing') ensureLoop();

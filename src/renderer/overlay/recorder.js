@@ -32,6 +32,7 @@
       this.recording = false; this.paused = false; this.opts = {};
       this.warmTimer = null; this.previewTimer = null; this.previewBusy = false;
       this.ring = [];
+      this.generation = 0;
       this._resetSeg();
       this.noiseFloor = 0.004;
     }
@@ -46,33 +47,40 @@
 
     _resetSeg() { this.seg = { chunks: [], samples: 0, peak: 0, hadSpeech: false, silentRun: 0, lead: null }; }
 
-    async _ensure(deviceId) {
+    async _ensure(deviceId, generation) {
       clearTimeout(this.warmTimer);
       const key = deviceId || 'default';
       if (this.stream && this.deviceKey === key && this.stream.getAudioTracks().every((t) => t.readyState === 'live')) return;
-      this._releaseMic();
+      this._teardown();
       const audio = { channelCount: 1, echoCancellation: false, noiseSuppression: true, autoGainControl: true };
       if (deviceId && deviceId !== 'default') audio.deviceId = { exact: deviceId };
-      try { this.stream = await navigator.mediaDevices.getUserMedia({ audio }); }
-      catch (e) { if (audio.deviceId) { delete audio.deviceId; this.stream = await navigator.mediaDevices.getUserMedia({ audio }); } else throw e; }
-      this.deviceKey = key;
-      // the audio context and capture worklet are built once and kept, so reopening the mic is all a cold start costs
-      if (!this.ctx || this.ctx.state === 'closed') {
-        this.ctx = new AudioContext({ sampleRate: RATE, latencyHint: 'interactive' });
-        await this.ctx.audioWorklet.addModule(this.opts.workletUrl || 'recorder-worklet.js');
-        this.node = new AudioWorkletNode(this.ctx, 'capture');
-        this.node.port.onmessage = (e) => this._block(e.data);
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio }); }
+      catch (e) {
+        if (generation !== this.generation) return;
+        if (!audio.deviceId) throw e;
+        delete audio.deviceId;
+        stream = await navigator.mediaDevices.getUserMedia({ audio });
       }
-      this.src = this.ctx.createMediaStreamSource(this.stream);
+      if (generation !== this.generation) { stream.getTracks().forEach((t) => t.stop()); return; }
+      this.stream = stream;
+      this.deviceKey = key;
+      const ctx = this.ctx = new AudioContext({ sampleRate: RATE, latencyHint: 'interactive' });
+      await ctx.audioWorklet.addModule(this.opts.workletUrl || 'recorder-worklet.js');
+      if (generation !== this.generation) return;
+      const node = this.node = new AudioWorkletNode(ctx, 'capture');
+      node.port.onmessage = (e) => { if (this.node === node) this._block(e.data); };
+      this.src = ctx.createMediaStreamSource(stream);
       this.src.connect(this.node);
     }
 
-    // lets go of the microphone (so Windows stops showing it in use) but keeps the audio pipeline ready
+    // Once capture is interrupted, neither pre-roll nor partial worklet frames belong to a future take.
     _releaseMic() {
       try { this.src?.disconnect(); } catch { }
       try { this.stream?.getTracks().forEach((t) => t.stop()); } catch { }
       this.stream = this.src = null; this.deviceKey = null;
-      try { if (this.ctx && this.ctx.state === 'running') this.ctx.suspend(); } catch { }
+      this.ring = [];
+      this.noiseFloor = 0.004;
     }
 
     _teardown() {
@@ -82,19 +90,27 @@
     }
 
     async start(opts) {
+      const generation = ++this.generation;
       this.opts = opts; this._resetSeg(); this.paused = false;
       this.lastSpeechAt = null; this.autoStopped = false; this.prevTrail = null;
-      try { await this._ensure(opts.deviceId); } catch (e) {
-        this.h.onError(e.name === 'NotAllowedError' ? 'Microphone access is blocked' : e.name === 'NotFoundError' ? 'No microphone found' : `Microphone error: ${e.message}`);
+      try {
+        await this._ensure(opts.deviceId, generation);
+        if (generation !== this.generation) return false;
+        if (this.ctx.state === 'suspended') await this.ctx.resume();
+      } catch (e) {
+        if (generation !== this.generation) return false;
+        this.cancel();
+        this.h.onError(opts.captureId, e.name === 'NotAllowedError' ? 'Microphone access is blocked' : e.name === 'NotFoundError' ? 'No microphone found' : `Microphone error: ${e.message}`);
         return false;
       }
-      if (this.ctx.state === 'suspended') await this.ctx.resume();
+      if (generation !== this.generation) return false;
       this.recording = true; this.t0 = performance.now();
       const pre = this.ring; this.ring = [];
-      for (const f of pre) { if (opts.stream) this.h.onChunk(this._pcm(f)); else this.seg.chunks.push(f); this.seg.samples += f.length; }
+      for (const f of pre) { if (opts.stream) this.h.onChunk(opts.captureId, this._pcm(f)); else this.seg.chunks.push(f); this.seg.samples += f.length; }
       this.lastSpeechAt = this.t0 + 3000;
       clearInterval(this.previewTimer);
-      if (opts.preview && !opts.stream) this.previewTimer = setInterval(() => this._preview(), 3000);
+      this.previewBusy = false;
+      if (opts.preview && !opts.stream) this.previewTimer = setInterval(() => this._preview(generation), 3000);
       return true;
     }
 
@@ -111,14 +127,14 @@
       if (this.paused) return;
       const s = this.seg;
       if (this.opts.stream) {
-        this.h.onChunk(this._pcm(f));
+        this.h.onChunk(this.opts.captureId, this._pcm(f));
       } else s.chunks.push(f);
       s.samples += f.length; if (peak > s.peak) s.peak = peak;
       const thr = Math.max(0.012, this.noiseFloor * 3.2);
       const inSpeech = s.hadSpeech && s.silentRun / RATE < 0.5;
       const loud = rms > thr || (inSpeech && rms > thr * 0.45);
       if (loud) { if (!s.hadSpeech) s.lead = s.samples - f.length; s.hadSpeech = true; s.silentRun = 0; this.lastSpeechAt = this.now(); } else { s.silentRun += f.length; this.noiseFloor = this.noiseFloor * 0.97 + rms * 0.03; }
-      if (this.opts.autoStopMs && !this.autoStopped && this.now() - this.lastSpeechAt >= this.opts.autoStopMs) { this.autoStopped = true; if (this.h.onAutoStop) this.h.onAutoStop(); }
+      if (this.opts.autoStopMs && !this.autoStopped && this.now() - this.lastSpeechAt >= this.opts.autoStopMs) { this.autoStopped = true; this.h.onAutoStop?.(this.opts.captureId); }
       if (this.opts.continuous) {
         const silentMs = (s.silentRun / RATE) * 1000, durMs = (s.samples / RATE) * 1000;
         if (s.hadSpeech && silentMs >= this.opts.silenceMs && durMs > 600) this._emit(false);

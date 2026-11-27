@@ -15,7 +15,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 const PCM_RATE: usize = 16_000;
 const MAX_PCM_BYTES: usize = PCM_RATE * 2 * 60 * 20;
@@ -88,6 +88,8 @@ struct Sess {
     pcm: Vec<u8>,
     next_stream: u64,
     extra_cost: f64,
+    live_sec: Option<f64>,
+    captions: bool,
     aborted: bool,
     rec_launched: bool,
     pending_stop: bool,
@@ -117,6 +119,8 @@ static SESS: LazyLock<Mutex<Sess>> = LazyLock::new(|| {
         pcm: vec![],
         next_stream: 1000,
         extra_cost: 0.0,
+        live_sec: None,
+        captions: false,
         aborted: false,
         rec_launched: false,
         pending_stop: false,
@@ -129,6 +133,7 @@ static SESS: LazyLock<Mutex<Sess>> = LazyLock::new(|| {
         idle_timer: 0,
         before_task: None,
         before: String::new(),
+        target: None,
     })
 });
 static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -136,6 +141,7 @@ type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 static QUEUE: Mutex<Option<mpsc::UnboundedSender<Job>>> = Mutex::new(None);
 static RT: Mutex<Option<tokio::runtime::Handle>> = Mutex::new(None);
 static TIMER_SEQ: AtomicUsize = AtomicUsize::new(1);
+static GENERATION: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::channel(0).0);
 
 fn s() -> std::sync::MutexGuard<'static, Sess> {
     SESS.lock().unwrap()
@@ -156,10 +162,21 @@ pub fn init() {
     });
 }
 
-fn enqueue(fut: impl Future<Output = ()> + Send + 'static) {
+fn enqueue(sid: u64, fut: impl Future<Output = ()> + Send + 'static) {
+    let mut generation = GENERATION.subscribe();
+    if *generation.borrow_and_update() != sid {
+        return;
+    }
     INFLIGHT.fetch_add(1, Ordering::SeqCst);
-    if let Some(q) = QUEUE.lock().unwrap().as_ref() {
-        let _ = q.send(Box::pin(fut));
+    let job = async move {
+        tokio::select! {
+            biased;
+            _ = generation.changed() => {}
+            _ = fut => {}
+        }
+    };
+    if !QUEUE.lock().unwrap().as_ref().is_some_and(|q| q.send(Box::pin(job)).is_ok()) {
+        INFLIGHT.fetch_sub(1, Ordering::SeqCst);
     }
 }
 fn inflight() -> usize {
@@ -193,9 +210,18 @@ fn is_active(g: &Sess) -> bool {
 fn toast(kind: &str, message: &str) {
     push("toast", "main", json!({ "kind": kind, "message": message }));
 }
-fn partial(_text: &str, _stage: &str) {}
-fn recorder(cmd: &str, opts: Value) {
-    push("rec:cmd", "overlay", json!({ "cmd": cmd, "opts": opts }));
+fn caption(sid: u64, text: &str) {
+    let g = s();
+    if current(&g, sid) && g.state == St::Listening && g.captions {
+        push("overlay:caption", "overlay", json!({ "sid": sid, "text": text }));
+    }
+}
+fn recorder(sid: u64, cmd: &str, opts: Value) {
+    push("rec:cmd", "overlay", json!({ "sid": sid, "cmd": cmd, "opts": opts }));
+}
+
+fn current(g: &Sess, sid: u64) -> bool {
+    !g.aborted && g.id == sid && !LOCKED.load(Ordering::Acquire)
 }
 
 /// Longer pauses with Speech support on.
@@ -209,7 +235,7 @@ fn stretch(ms: &Value, support: bool) -> Value {
 fn set_state(g: &mut Sess, st: St, extra: Value) {
     g.state = st;
     let mut payload =
-        json!({ "state": st.name(), "mode": g.mode, "app": g.ctx.as_ref().map(|c| c.app_name.clone()) });
+        json!({ "sid": g.id, "state": st.name(), "mode": g.mode, "app": g.ctx.as_ref().map(|c| c.app_name.clone()) });
     if let Some(o) = extra.as_object() {
         for (k, v) in o {
             payload[k] = v.clone();
@@ -444,7 +470,7 @@ async fn translate_selection() {
                 .collect();
             // a card goes by the box the text was copied from, not by the pill or wherever the mouse is
             let anchor = if card { tokio::task::spawn_blocking(crate::native::focus_rect).await.ok().flatten() } else { None };
-            crate::core::push("translate:show", "main", json!({ "target": target, "card": card, "regions": regions, "anchor": anchor }));
+            crate::core::push("translate:show", "main", json!({ "target": target, "card": card, "regions": regions, "anchor": anchor, "truncated": truncated }));
             crate::core::push("overlay:state", "overlay", json!({ "state": "idle" }));
         }
         Ok(Err(e)) => pill_message(&e),
@@ -571,7 +597,7 @@ async fn translate_all(texts: &[String], target: &str) -> Result<(Vec<String>, b
         for (n, &i) in batch.iter().enumerate() {
             match numbered(&back, n + 1) {
                 Some(t) => out.push((i, t)),
-                None => out.push((i, translate(&texts[i], target).await?)),
+                None => out.push((i, translate(&budgeted_ref[i], target).await?)),
             }
         }
         Ok::<_, String>(out)
@@ -582,7 +608,7 @@ async fn translate_all(texts: &[String], target: &str) -> Result<(Vec<String>, b
             all[i] = t;
         }
     }
-    Ok(all)
+    Ok((all, truncated))
 }
 
 /// The text of `<p id="n">â€¦</p>` in a numbered translation.
@@ -757,12 +783,13 @@ pub async fn start(mode: &'static str) {
     let sid;
     {
         let mut g = s();
-        if !can_start(g.state) {
+        if !can_start(g.state) || LOCKED.load(Ordering::Acquire) {
             return;
         }
         g.idle_timer += 1;
         g.id += 1;
         sid = g.id;
+        GENERATION.send_replace(sid);
         g.mode = Some(mode);
         g.inserted = 0;
         g.session_text.clear();
@@ -770,6 +797,8 @@ pub async fn start(mode: &'static str) {
         g.rt = None;
         g.pcm.clear();
         g.extra_cost = 0.0;
+        g.live_sec = None;
+        g.captions = false;
         g.aborted = false;
         g.rec_launched = false;
         g.pending_stop = false;
@@ -803,15 +832,18 @@ pub async fn start(mode: &'static str) {
         });
         (primary, live, route::batch_refs(&store, ranked))
     };
-    s().speech_refs = batch;
-    if let Some((r, cand)) = live {
-        let stream = {
-            let mut g = s();
+    {
+        let mut g = s();
+        if !current(&g, sid) {
+            return;
+        }
+        g.speech_refs = batch;
+        if let Some((r, cand)) = live.and_then(|(r, c)| crate::parse_cands(&json!([c])).pop().map(|c| (r, c))) {
             g.next_stream += 1;
             let n = g.next_stream;
             g.rt = Some(Rt {
                 stream: n,
-                r: r.clone(),
+                r,
                 bytes: 0,
                 finals: 0,
                 stopping: false,
@@ -862,9 +894,19 @@ pub async fn start(mode: &'static str) {
         } else {
             None
         };
-    }
-    let stop_now = {
-        let mut g = s();
+        let live_on = g.rt.is_some();
+        g.captions = d["livePreview"] == json!(true);
+        recorder(sid, "start", json!({
+            "deviceId": d["micDeviceId"], "stream": live_on, "continuous": live_on || mode == "handsfree" || streaming,
+            "preview": g.captions && !streaming && !live_on && mode != "handsfree",
+            "silenceMs": if mode == "handsfree" {
+                stretch(&d["silenceMs"], support)
+            } else {
+                json!(d["streamPauseMs"].as_u64().filter(|n| *n > 0).unwrap_or(550))
+            },
+            "autoStopMs": if mode == "hold" { json!(0) } else { stretch(&json!(d["autoStopMs"].as_u64().unwrap_or(3000)), support) },
+            "noiseGate": d["noiseGate"], "sounds": c["appearance"]["sounds"],
+        }));
         g.rec_launched = true;
         set_state(
             &mut g,
@@ -874,15 +916,19 @@ pub async fn start(mode: &'static str) {
         std::mem::take(&mut g.pending_stop)
     };
     if stop_now {
-        stop();
+        stop_session(Some(sid));
     }
 }
 
 pub fn stop() {
+    stop_session(None);
+}
+
+fn stop_session(expected: Option<u64>) {
     let sid;
     {
         let mut g = s();
-        if !is_active(&g) {
+        if !is_active(&g) || expected.is_some_and(|sid| !current(&g, sid)) {
             return;
         }
         if !g.rec_launched {
@@ -1035,22 +1081,22 @@ pub fn on_chunk(sid: u64, buf: Vec<u8>) {
     }
 }
 
-pub fn on_auto_stop() {
+pub fn on_auto_stop(sid: u64) {
     let ok = {
         let g = s();
-        g.mode != Some("hold") && g.state == St::Listening
+        current(&g, sid) && g.mode != Some("hold") && g.state == St::Listening
     };
     if ok {
-        stop();
+        stop_session(Some(sid));
     }
 }
 
-pub fn on_boundary(last: bool, gap_ms: Option<u64>) {
+pub fn on_boundary(sid: u64, last: bool, gap_ms: Option<u64>) {
     let mut g = s();
-    if g.aborted {
+    if !current(&g, sid) {
         return;
     }
-    let Some(r) = g.rt.as_mut() else { return };
+    let Some(r) = g.rt.as_mut().filter(|r| !r.finished) else { return };
     let (stream, failed) = (r.stream, r.failed);
     let mut fallback = false;
     if last {
@@ -1083,7 +1129,7 @@ pub fn on_boundary(last: bool, gap_ms: Option<u64>) {
         };
         after(8000, move || {
             if s().rt.as_ref().is_some_and(|r| r.timer == timer && !r.finished) {
-                rt_fail("The live transcription took too long to finish");
+                rt_fail(sid, "The live transcription took too long to finish");
             }
         });
     }
@@ -1091,33 +1137,34 @@ pub fn on_boundary(last: bool, gap_ms: Option<u64>) {
 
 pub fn on_rt_event(m: Value) {
     let stream = m["stream"].as_u64().unwrap_or(0);
-    let ok = {
-        let g = s();
-        g.rt.as_ref().is_some_and(|r| r.stream == stream) && !g.aborted
+    let sid = {
+        let mut g = s();
+        if !current(&g, g.id) {
+            return;
+        }
+        let Some(r) = g.rt.as_mut().filter(|r| r.stream == stream && !r.failed && !r.finished) else { return };
+        if m["type"] == "final" {
+            r.finals += 1;
+        }
+        g.id
     };
-    if !ok {
-        return;
-    }
     match m["type"].as_str().unwrap_or("") {
-        "partial" => partial(m["text"].as_str().unwrap_or(""), "live"),
+        "partial" => caption(sid, m["text"].as_str().unwrap_or("")),
         "final" => {
-            if let Some(r) = s().rt.as_mut() {
-                r.finals += 1;
-            }
             let text = m["text"].as_str().unwrap_or("").to_string();
-            partial(&text, "segment");
+            caption(sid, &text);
             let gap = m["gap_ms"].as_u64();
-            enqueue(async move {
-                rt_piece(text, gap).await;
+            enqueue(sid, async move {
+                rt_piece(sid, text, gap).await;
             });
         }
-        "done" => enqueue(async {
-            rt_finish().await;
+        "done" => enqueue(sid, async move {
+            rt_finish(sid).await;
         }),
         "error" => {
             let msg = m["message"].as_str().unwrap_or("").to_string();
             if m["fatal"] == json!(true) {
-                rt_fail(&msg);
+                rt_fail(sid, &msg);
             } else {
                 toast("error", &msg);
             }
@@ -1228,23 +1275,17 @@ fn rt_fallback(sid: u64) {
             })
             .await;
         } else {
-            flush().await;
+            {
+                let mut g = s();
+                if !current(&g, sid) {
+                    return;
+                }
+                g.last_error = Some("Live transcription ended before all speech was recognised".into());
+            }
+            flush(sid).await;
         }
-        finalize_result().await;
+        finalize_result(sid);
     });
-}
-
-fn rt_end(cancelled: bool) {
-    let mut g = s();
-    g.pcm.clear();
-    if let Some(r) = g.rt.as_ref() {
-        if cancelled && !r.failed {
-            rt::cmd(r.stream, rt::Cmd::Close);
-        }
-    }
-    if cancelled {
-        g.rt = None;
-    }
 }
 
 fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
@@ -1273,10 +1314,10 @@ pub struct Seg {
     pub gap_ms: Option<u64>,
 }
 
-pub fn on_segment(seg: Seg) {
+pub fn on_segment(sid: u64, seg: Seg) {
     {
         let mut g = s();
-        if g.aborted {
+        if !current(&g, sid) || g.rt.is_some() || (!is_active(&g) && g.state != St::Processing) {
             return;
         }
         if seg.last && g.state != St::Processing {
@@ -1284,32 +1325,40 @@ pub fn on_segment(seg: Seg) {
         }
     }
     let last = seg.last;
-    enqueue(async move {
-        process(seg).await;
+    enqueue(sid, async move {
+        process(sid, seg).await;
         if last {
-            finalize_result().await;
+            finalize_result(sid);
         }
     });
 }
 
-async fn process(seg: Seg) {
-    if s().aborted {
+async fn process(sid: u64, seg: Seg) {
+    if !current(&s(), sid) {
         return;
     }
     let c = cfg();
     let d = &c["dictation"];
     let last = seg.last;
     if seg.duration_sec * 1000.0 < d["minMs"].as_f64().unwrap_or(350.0) {
-        s().skip_msg = Some("Too short".into());
+        {
+            let mut g = s();
+            if !current(&g, sid) { return; }
+            g.skip_msg = Some("Too short".into());
+        }
         if last {
-            flush().await;
+            flush(sid).await;
         }
         return;
     }
     if seg.peak < d["noiseGate"].as_f64().unwrap_or(0.01) {
-        s().skip_msg = Some("Didn't hear anything".into());
+        {
+            let mut g = s();
+            if !current(&g, sid) { return; }
+            g.skip_msg = Some("Didn't hear anything".into());
+        }
         if last {
-            flush().await;
+            flush(sid).await;
         }
         return;
     }
@@ -1339,52 +1388,72 @@ async fn process(seg: Seg) {
             r
         }
         Err(e) => {
-            s().last_error = Some(if e.not_configured {
-                "Add an API key in Models to start dictating".to_string()
-            } else {
-                e.message.chars().take(160).collect()
-            });
+            {
+                let mut g = s();
+                if !current(&g, sid) {
+                    return;
+                }
+                g.last_error = Some(e.message.chars().take(160).collect());
+            }
             toast("error", &e.message);
+            if last {
+                flush(sid).await;
+            }
             return;
         }
     };
-    if s().aborted {
+    if !current(&s(), sid) {
         return;
     }
     if stt.text.is_empty() || (seg.duration_sec < 2.5 && hallucination(&stt.text)) {
-        s().skip_msg = Some("Didn't catch that".into());
+        {
+            let mut g = s();
+            if !current(&g, sid) { return; }
+            g.skip_msg = Some("Didn't catch that".into());
+        }
         if last {
-            flush().await;
+            flush(sid).await;
         }
         return;
     }
-    handle_raw(&stt.text, seg.duration_sec, Some(stt.r), stt.cost, seg.gap_ms).await;
+    handle_raw(sid, &stt.text, seg.duration_sec, Some(stt.r), stt.cost, seg.gap_ms);
     if last {
-        flush().await;
+        flush(sid).await;
     }
 }
 
-pub async fn preview(wav: Vec<u8>, duration_sec: f64) -> String {
-    {
+pub async fn preview(sid: u64, wav: Vec<u8>, duration_sec: f64) -> String {
+    let mut generation = GENERATION.subscribe();
+    if *generation.borrow_and_update() != sid {
+        return String::new();
+    }
+    let refs = {
         let g = s();
-        if !is_active(&g) || g.rt.is_some() {
+        if !current(&g, sid) || g.state != St::Listening || g.rt.is_some() || !g.captions {
             return String::new();
         }
-    }
+        g.speech_refs.first().cloned().into_iter().collect::<Vec<_>>()
+    };
     let c = cfg();
-    let refs = s().speech_refs.first().cloned().into_iter().collect::<Vec<_>>();
     let lang = crate::accent::language(&c);
     let prompt = crate::accent::stt_prompt(&c, duration_sec);
-    match hub::transcribe(
+    let request = hub::transcribe(
         &refs,
         &wav,
         duration_sec,
         if lang == "auto" { None } else { Some(lang.as_str()) },
         &prompt,
-    )
-    .await
-    {
-        Ok(r) => {
+    );
+    let result = tokio::select! {
+        biased;
+        _ = generation.changed() => return String::new(),
+        result = request => result,
+    };
+    match result {
+        Ok(r) if {
+            let g = s();
+            current(&g, sid) && g.state == St::Listening
+        } => {
             let text = crate::accent::strip_echo(&r.text, &prompt);
             if hallucination(&text) {
                 String::new()
@@ -1392,23 +1461,31 @@ pub async fn preview(wav: Vec<u8>, duration_sec: f64) -> String {
                 text
             }
         }
-        Err(_) => String::new(),
+        _ => String::new(),
     }
 }
 
-async fn handle_raw(raw: &str, sec: f64, r: Option<String>, cost: f64, gap_ms: Option<u64>) {
+fn handle_raw(sid: u64, raw: &str, sec: f64, r: Option<String>, cost: f64, gap_ms: Option<u64>) {
     let personal = core::get().store.lock().unwrap().config["personal"].clone();
     let raw = crate::learn::strip_vocab_echo(raw, &personal);
     if raw.is_empty() {
         return;
     }
+    let mut g = s();
+    if !current(&g, sid) {
+        return;
+    }
     if let Some(term) = parse_vocab_command(&raw) {
         add_vocab(&term);
+        let n = format!("Added {term} to your vocabulary");
+        g.notice = Some(n.clone());
+        drop(g);
+        core::changed("config");
+        toast("ok", &n);
         return;
     }
 
     // Every piece is held, and the whole dictation is formatted once when listening ends.
-    let mut g = s();
     if g.ctx.is_some() {
         g.buffer.push(Held { raw, sec, r, cost, gap_ms });
     }
@@ -1428,35 +1505,47 @@ fn add_vocab(term: &str) {
             st.touch("config.json");
         }
     }
-    core::changed("config");
-    let n = format!("Added {term} to your vocabulary");
-    s().notice = Some(n.clone());
-    toast("ok", &n);
 }
 
-async fn flush() {
-    let items = {
+async fn flush(sid: u64) {
+    let (items, live_sec, partial_result) = {
         let mut g = s();
-        if g.buffer.is_empty() || g.aborted {
+        if g.buffer.is_empty() || !current(&g, sid) {
             return;
         }
-        std::mem::take(&mut g.buffer)
+        (std::mem::take(&mut g.buffer), g.live_sec, g.last_error.is_some())
     };
     let pieces: Vec<(String, Option<u64>)> = items.iter().map(|i| (i.raw.clone(), i.gap_ms)).collect();
     let raw = join::join_pieces(&pieces);
-    let sec: f64 = items.iter().map(|i| i.sec).sum();
+    let sec = live_sec.unwrap_or_else(|| items.iter().map(|i| i.sec).sum());
     let cost: f64 = items.iter().map(|i| i.cost).sum();
-    commit(&raw, sec, items[0].r.clone(), cost).await;
+    if partial_result {
+        let mut g = s();
+        if current(&g, sid) {
+            g.unplaced.push(raw);
+        }
+        return;
+    }
+    commit(sid, &raw, sec, items[0].r.clone(), cost).await;
 }
 
-async fn message_context() -> String {
-    let task = s().before_task.take();
-    let Some(task) = task else { return s().before.clone() };
+async fn message_context(sid: u64) -> String {
+    let task = {
+        let mut g = s();
+        if !current(&g, sid) {
+            return String::new();
+        }
+        let Some(task) = g.before_task.take() else { return g.before.clone() };
+        task
+    };
     let text = match tokio::time::timeout(Duration::from_millis(1500), task).await {
         Ok(Ok(Some(t))) => t,
         _ => String::new(),
     };
-    s().before = text.clone();
+    let mut g = s();
+    if current(&g, sid) {
+        g.before = text.clone();
+    }
     text
 }
 
@@ -1468,16 +1557,18 @@ pub(crate) fn fit_to_app(text: String, ctx: &Context) -> String {
     text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
-async fn commit(raw: &str, sec: f64, stt_ref: Option<String>, stt_cost: f64) {
+async fn commit(sid: u64, raw: &str, sec: f64, stt_ref: Option<String>, stt_cost: f64) {
     let ctx = {
         let g = s();
         g.ctx.clone()
     };
     let Some(mut ctx) = ctx else { return };
-    ctx.before = message_context().await;
-    partial(raw, "formatting");
+    ctx.before = message_context(sid).await;
+    if !current(&s(), sid) {
+        return;
+    }
     let f = formatter::format(raw, &ctx, false).await;
-    if s().aborted {
+    if !current(&s(), sid) {
         return;
     }
     let personal = core::get().store.lock().unwrap().config["personal"].clone();
@@ -1485,6 +1576,8 @@ async fn commit(raw: &str, sec: f64, stt_ref: Option<String>, stt_cost: f64) {
     text = fit_to_app(text, &ctx);
     // unusual words heard in several sentences become vocabulary suggestions
     if ctx.kind != "code" && cfg()["privacy"]["learnWords"] != json!(false) {
+        let g = s();
+        if !current(&g, sid) { return; }
         let mut st = core::get().store.lock().unwrap();
         let mut personal = st.config["personal"].clone();
         if crate::learn::notice(&mut personal, &text) {
@@ -1586,10 +1679,17 @@ fn save_history(
     pasted: bool,
 ) {
     let words = word_count(text);
-    let (extra, ctx_app, exe) = {
-        let mut g = s();
-        (std::mem::take(&mut g.extra_cost), g.ctx.clone(), g.exe.clone())
-    };
+    let mut g = s();
+    if !current(&g, sid) {
+        return;
+    }
+    if pasted {
+        g.inserted += 1;
+        g.session_text.push(text.to_string());
+    } else {
+        g.unplaced.push(text.to_string());
+    }
+    let (extra, ctx_app, exe) = (std::mem::take(&mut g.extra_cost), g.ctx.clone(), g.exe.clone());
     let cost = stt_cost + extra + f.cost;
     let save = core::get().store.lock().unwrap().config["privacy"]["saveHistory"] != json!(false);
     {
@@ -1619,8 +1719,8 @@ fn save_history(
         }
         st.record_usage(&day_key(now_ms()), &json!({ "dictations": 1, "words": words, "audioSec": sec }));
     }
+    drop(g);
     core::changed("history");
-    partial(text, "done");
 }
 
 #[cfg(all(test, local_tests))]

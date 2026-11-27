@@ -30,23 +30,31 @@ class Core extends EventEmitter {
     if (!this.exePath || this.proc) return false;
     const p = this.proc = spawn(this.exePath, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     p.stdout.setEncoding('utf8');
-    p.stdout.on('data', (d) => this._data(d));
+    p.stdout.on('data', (d) => { if (this.proc === p) this._data(d); });
     p.stderr.on('data', (d) => this.log(String(d).trim()));
     p.stdin.on('error', () => {});
-    p.on('error', (e) => { this.log('core failed to start: ' + e.message); this._down(); });
-    p.on('exit', () => this._down());
+    p.on('error', (e) => { this.log('core failed to start: ' + e.message); this._down(p); });
+    p.on('exit', () => this._down(p));
     return true;
   }
 
-  _down() {
-    const was = !!this.proc;
+  _down(p) {
+    if (this.proc !== p) return;
     this.proc = null; this.buf = '';
     for (const { reject } of this.pending.values()) reject(new Error('the core stopped'));
     this.pending.clear();
     this.emit('down');
-    if (was && !this.quitting && this.restarts < 5) {
+    if (!this.quitting && this.restarts < 5) {
       this.restarts++;
-      setTimeout(() => { if (this.start() && this.initArgs) this.call('init', this.initArgs, 8000).then(() => this.emit('restarted')).catch(() => {}); }, 600 * this.restarts);
+      setTimeout(() => {
+        if (this.quitting || !this.initArgs || !this.start()) return;
+        const p = this.proc;
+        this.call('init', { ...this.initArgs, locked: true }, 8000).then((r) => {
+          if (this.proc !== p) return;
+          if (r.ok) this.emit('restarted');
+          else p.kill();
+        }).catch(() => { if (this.proc === p) p.kill(); });
+      }, 600 * this.restarts);
     }
   }
 
