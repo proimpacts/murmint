@@ -25,18 +25,57 @@
     return { ok: list.length > 0, devices, defaultName: def ? clean(def.label) : '' };
   }
 
+  let micGen = 0;
+  let micActive = false;
   let test = null;
+  const stopTest = () => {
+    if (!test) return;
+    const cur = test;
+    test = null;
+    if (cur.rafId) cancelAnimationFrame(cur.rafId);
+    cur.stream?.getTracks().forEach((t) => t.stop());
+    try { cur.ctx?.close?.(); } catch {}
+  };
   async function micTest(onOff, device) {
-    if (test) { cancelAnimationFrame(test.raf); test.stream.getTracks().forEach((t) => t.stop()); test.ac.close(); test = null; emitLocal('mic:level', 0); }
-    if (!onOff) return;
+    const myGen = ++micGen;
+    micActive = !!onOff;
+    stopTest();
+    if (!onOff) {
+      emitLocal('mic:level', 0);
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: device && device !== 'default' ? { deviceId: { exact: device } } : true });
-      const ac = new AudioContext(); const an = ac.createAnalyser(); an.fftSize = 512; ac.createMediaStreamSource(stream).connect(an);
-      const buf = new Float32Array(an.fftSize);
-      test = { stream, ac, raf: 0 };
-      const tick = () => { an.getFloatTimeDomainData(buf); let s = 0; for (const v of buf) s += v * v; emitLocal('mic:level', Math.min(1, Math.sqrt(s / buf.length) * 9)); test.raf = requestAnimationFrame(tick); };
-      tick();
-    } catch { }
+      if (!micActive || myGen !== micGen) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      const ctx = new AudioContext();
+      try {
+        const an = ctx.createAnalyser();
+        an.fftSize = 512;
+        ctx.createMediaStreamSource(stream).connect(an);
+        const buf = new Float32Array(an.fftSize);
+        const cur = { stream, ctx, rafId: 0 };
+        test = cur;
+        const tick = () => {
+          if (!micActive || myGen !== micGen || test !== cur) return;
+          an.getFloatTimeDomainData(buf);
+          let s = 0;
+          for (const v of buf) s += v * v;
+          emitLocal('mic:level', Math.min(1, Math.sqrt(s / buf.length) * 9));
+          if (!micActive || myGen !== micGen || test !== cur) return;
+          cur.rafId = requestAnimationFrame(tick);
+        };
+        tick();
+      } catch {
+        stream.getTracks().forEach((t) => t.stop());
+        try { ctx.close?.(); } catch {}
+        if (test && test.stream === stream) test = null;
+      }
+    } catch {
+      if (myGen === micGen) micActive = false;
+    }
   }
 
   window.murmint = {
