@@ -12,7 +12,7 @@
       const seen = { ...(p.vocabSeen || {}) };
       delete seen[t.toLowerCase()];
       App.set('personal.vocabSeen', seen);
-      App.set('personal.vocabulary', [...p.vocabulary, { id: UI.uid(), term: t, sounds: [], note: 'auto' }], { render: true });
+      App.set('personal.vocabulary', [...p.vocabulary, { id: UI.uid(), term: t, sounds: [], note: 'suggested' }], { render: true });
     };
     const dismiss = (w) => {
       const seen = { ...(p.vocabSeen || {}) };
@@ -39,7 +39,7 @@
         'No words yet. Just dictate: names and terms Murmint hears in several sentences show up here to add.'));
     }
     for (const v of p.vocabulary) {
-      const badge = v.note === 'auto' ? UI.badge('Suggested', 'accent') : v.note === 'voice' ? UI.badge('Said aloud', 'accent') : null;
+      const badge = (v.note === 'suggested' || v.note === 'auto') ? UI.badge('Suggested', 'accent') : v.note === 'voice' ? UI.badge('Said aloud', 'accent') : null;
       list.append(h('div', { class: 'item' },
         h('div', { class: 'flex between' },
           h('div', { class: 'flex' }, h('b', { style: { fontSize: '15px' } }, v.term), badge),

@@ -310,9 +310,12 @@ impl Store {
         if cfg["appearance"]["accent"] == "mono" && cfg["appearance"]["accentPicked"] != json!(true) {
             cfg["appearance"]["accent"] = json!("ember");
         }
-        if let Some(v) = cfg["personal"]["vocabulary"].as_array_mut() {
-            v.retain(|e| !matches!(e["note"].as_str(), Some("auto") | Some("edit")));
+        if saved["vocabAutoCleaned"] != json!(true) {
+            if let Some(v) = cfg["personal"]["vocabulary"].as_array_mut() {
+                v.retain(|e| !matches!(e["note"].as_str(), Some("auto") | Some("edit")));
+            }
         }
+        cfg["vocabAutoCleaned"] = json!(true);
         if let Some(p) = cfg["personal"].as_object_mut() {
             for k in ["termCounts", "dismissed", "learnEdits", "corrections", "snippets"] {
                 p.remove(k);
