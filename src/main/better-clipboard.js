@@ -47,17 +47,36 @@ function save() {
 }
 const id = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
+function key(x) {
+  if (!x) return '';
+  if (x.kind === 'files') return 'files:' + (Array.isArray(x.files) && x.files.length ? x.files.join('|') : x.text || '');
+  if (x.kind === 'image') return x.hash ? 'img:' + x.hash : (x.file || '');
+  return x.text || x.url || x.source || x.file || '';
+}
+
 function add(item) {
   load();
-  const key = (x) => x.text || x.url || x.source || x.file;
-  const same = items.findIndex((x) => x.kind === item.kind && key(x) === key(item));
-  if (same >= 0) item = { ...items.splice(same, 1)[0], at: Date.now() };
+  const k = key(item);
+  const same = items.findIndex((x) => x.kind === item.kind && key(x) === k);
+  if (same >= 0) {
+    const existing = items.splice(same, 1)[0];
+    let file = existing.file || item.file;
+    if (item.file && existing.file && item.file !== existing.file) {
+      if (fs.existsSync(existing.file)) {
+        try { fs.unlinkSync(item.file); } catch { }
+        file = existing.file;
+      } else {
+        file = item.file;
+      }
+    }
+    item = { ...existing, ...item, id: existing.id, file, pinned: existing.pinned, at: Date.now() };
+  }
   items.unshift(item);
   let unpinned = 0;
   items = items.filter((x) => {
     if (x.pinned) return true;
     if (++unpinned <= MAX) return true;
-    if (x.kind === 'image' || x.kind === 'gif') fs.rm(x.file, { force: true }, () => {});
+    if ((x.kind === 'image' || x.kind === 'gif') && x.file) { try { fs.unlinkSync(x.file); } catch { } }
     return false;
   });
   save();
@@ -237,9 +256,16 @@ async function pick(what) {
     await core.ui('clipboard:paste_file', { hwnd: target, path: item.file });
     return;
   }
+  if (item.kind === 'files') {
+    const paths = Array.isArray(item.files) && item.files.length ? item.files : String(item.text || '').split(/\r?\n/).filter(Boolean);
+    if (!paths.length) return;
+    await core.ui('clipboard:paste_file', { hwnd: target, paths });
+    return;
+  }
   if (item.kind === 'image') {
     const img = nativeImage.createFromPath(item.file);
     if (img.isEmpty()) return;
+    await core.ui('clipboard:suppress', 800);
     clipboard.writeImage(img);
     await core.ui('clipboard:paste_current', { hwnd: target });
     return;
