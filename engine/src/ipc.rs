@@ -88,7 +88,11 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
                             json!(format!("custom-{}", &uuid::Uuid::new_v4().simple().to_string()[..6])),
                         );
                     }
-                    n.insert("type".into(), json!("compatible"));
+                    let ptype = match n.get("type").and_then(Value::as_str) {
+                        Some("anthropic") => "anthropic",
+                        _ => "compatible",
+                    };
+                    n.insert("type".into(), json!(ptype));
                     n.insert("builtin".into(), json!(false));
                     n.insert("enabled".into(), json!(true));
                     if n.get("models").is_none() {
