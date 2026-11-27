@@ -307,18 +307,42 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
         }
         // a GIF (or any file) from Better Clipboard: on the clipboard as a file, back to the window, then Ctrl+V
         "clipboard:paste_file" => {
-            let hwnd = arg(0)["hwnd"].as_i64().unwrap_or(0);
-            let path = arg(0)["path"].as_str().unwrap_or("").to_string();
-            let ok = tokio::task::spawn_blocking(move || crate::clipboard::write_files(&[path])).await.unwrap_or(false);
-            let _ = tokio::task::spawn_blocking(move || crate::clipboard::refocus(hwnd)).await;
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let o = arg(0);
+            let hwnd = o["hwnd"].as_i64().unwrap_or(0);
+            let mut paths: Vec<String> = o["paths"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if paths.is_empty() {
+                if let Some(p) = o["path"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+                    paths.push(p);
+                }
+            }
+            if paths.is_empty() {
+                return json!(false);
+            }
+            let ok = tokio::task::spawn_blocking(move || crate::clipboard::write_files(&paths))
+                .await
+                .unwrap_or(false);
             if ok {
+                let _ = tokio::task::spawn_blocking(move || crate::clipboard::refocus(hwnd)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
                 native::handle("native_paste", &json!({})).await;
             }
             json!(ok)
         }
+        "clipboard:suppress" => {
+            crate::clipboard::suppress_capture(arg(0).as_u64().unwrap_or(800));
+            json!(true)
+        }
         // a picture the shell already put on the clipboard: back to the window, then Ctrl+V
         "clipboard:paste_current" => {
+            crate::clipboard::mark_own();
             let hwnd = arg(0)["hwnd"].as_i64().unwrap_or(0);
             let _ = tokio::task::spawn_blocking(move || crate::clipboard::refocus(hwnd)).await;
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;

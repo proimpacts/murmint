@@ -34,11 +34,11 @@ mod clip {
         false
     }
 
-    pub fn snapshot() -> Snapshot {
-        let mut out = vec![];
+    pub fn snapshot() -> Option<Snapshot> {
         if !open() {
-            return out;
+            return None;
         }
+        let mut out = vec![];
         unsafe {
             let mut fmt = 0u32;
             loop {
@@ -46,7 +46,13 @@ mod clip {
                 if fmt == 0 {
                     break;
                 }
-                if !(fmt == CF_UNICODETEXT || fmt == 1 || fmt == 7 || fmt == 8 || fmt == 16 || fmt >= 0xC000)
+                if !(fmt == CF_UNICODETEXT
+                    || fmt == 1
+                    || fmt == 7
+                    || fmt == 8
+                    || fmt == 15
+                    || fmt == 16
+                    || fmt >= 0xC000)
                 {
                     continue;
                 }
@@ -70,7 +76,7 @@ mod clip {
             }
             let _ = CloseClipboard();
         }
-        out
+        Some(out)
     }
 
     unsafe fn keep_out_of_history() {
@@ -194,8 +200,8 @@ mod clip {
 #[cfg(not(windows))]
 mod clip {
     pub type Snapshot = Vec<(u32, Vec<u8>)>;
-    pub fn snapshot() -> Snapshot {
-        vec![]
+    pub fn snapshot() -> Option<Snapshot> {
+        Some(vec![])
     }
     pub fn restore(_: &Snapshot) {}
     pub fn clear() {}

@@ -26,10 +26,18 @@
   };
   const src = (x) => (x.file ? 'file:///' + String(x.file).replace(/\\/g, '/') : x.url);
 
+  const fileLabel = (x) => {
+    const list = Array.isArray(x.files) && x.files.length ? x.files : String(x.text || '').split(/\r?\n/).filter(Boolean);
+    const names = list.map((p) => p.split(/[\\/]/).pop() || p);
+    if (names.length <= 1) return names[0] || '';
+    if (names.length <= 3) return `${names.length} files: ${names.join(', ')}`;
+    return `${names.length} files: ${names.slice(0, 2).join(', ')} (+${names.length - 2} more)`;
+  };
+
   function clipRow(x) {
     let body;
     if (x.kind === 'image' || x.kind === 'gif') body = el('img', { src: src(x), alt: '', loading: 'lazy' });
-    else if (x.kind === 'files') body = el('div', { className: 'files txt', textContent: x.text });
+    else if (x.kind === 'files') body = el('div', { className: 'files txt', textContent: fileLabel(x), title: x.text || '' });
     else body = el('div', { className: 'txt', textContent: x.text });
     const acts = el('div', { className: 'acts' });
     const act = (name, title, fn) => { const b = el('button', { title, innerHTML: ICON[name] }); b.addEventListener('click', (e) => { e.stopPropagation(); fn(); }); return b; };
