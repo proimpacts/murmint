@@ -27,7 +27,22 @@
     const label = document.createElement('span'); label.textContent = 'Murmint ' + u.version + ' is available. Would you like to install?';
     const go = document.createElement('button'); go.className = 'btn primary sm'; go.textContent = 'Install';
     const later = document.createElement('button'); later.className = 'btn ghost sm'; later.textContent = 'Later';
-    go.onclick = async () => { go.disabled = true; go.textContent = 'Updating…'; const r = await api.installUpdate(); if (!r || !r.ok) { go.disabled = false; go.textContent = 'Install'; UI.toast((r && r.message) || 'Could not install the update', 'error'); } };
+    go.onclick = async () => {
+      go.disabled = true;
+      go.textContent = 'Updating…';
+      try {
+        const r = await api.installUpdate();
+        if (!r || !r.ok) {
+          go.disabled = false;
+          go.textContent = 'Install';
+          UI.toast?.(r?.message || 'Update verification failed', 'error');
+        }
+      } catch (e) {
+        go.disabled = false;
+        go.textContent = 'Install';
+        UI.toast?.(e?.message || 'Update verification failed', 'error');
+      }
+    };
     later.onclick = () => bar.remove();
     bar.append(label, go, later); document.body.append(bar);
   };
