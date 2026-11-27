@@ -17,7 +17,7 @@ function close() {
   win = null;
 }
 
-async function show({ target, regions, anchor, accent }) {
+async function show({ target, regions, anchor, accent, truncated }) {
   close();
   const cursor = screen.getCursorScreenPoint();
   const text = (regions || []).map((r) => String(r.translation || '').trim()).filter(Boolean).join('\n\n');
@@ -43,7 +43,7 @@ async function show({ target, regions, anchor, accent }) {
   win.webContents.once('did-finish-load', () => {
     if (!win) return;
     win.webContents.send('translate:bubble', {
-      target, text, accent,
+      target, text, accent, truncated: !!truncated,
       theme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
       at: { x: at.x - bounds.x, y: at.y - bounds.y, w: at.w, h: at.h },
     });

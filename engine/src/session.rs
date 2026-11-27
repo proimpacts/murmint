@@ -361,7 +361,7 @@ async fn format_selection() {
 }
 
 /// Longest selection sent for translation; anything after it is left out and the reader is told.
-const TRANSLATE_MAX: usize = 8000;
+const TRANSLATE_MAX: usize = 24_000;
 /// Long text is translated in pieces of about this many characters, all at once, so it takes as long as one piece.
 const TRANSLATE_PIECE: usize = 1200;
 
@@ -417,9 +417,11 @@ async fn translate_selection() {
         "overlay",
         json!({ "state": "processing", "mode": "toggle", "label": "Translating", "exe": app.2, "site": site }),
     );
+    let ui_truncated = regions.iter().any(|r| r["truncated"] == json!(true));
     let texts: Vec<String> = regions.iter().map(|r| r["text"].as_str().unwrap_or_default().to_string()).collect();
     match tokio::time::timeout(Duration::from_secs(45), translate_all(&texts, &target)).await {
-        Ok(Ok(out)) => {
+        Ok(Ok((out, text_truncated))) => {
+            let truncated = ui_truncated || text_truncated;
             let regions: Vec<Value> = regions
                 .into_iter()
                 .zip(out)
@@ -481,29 +483,75 @@ fn holding(regions: Vec<Value>, selection: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Budgets `texts` to at most `max` total characters across all regions, returning the budgeted
+/// strings and whether any text was truncated.
+fn budget_texts(texts: &[String], max: usize) -> (Vec<String>, bool) {
+    let mut remaining = max;
+    let mut budgeted = Vec::with_capacity(texts.len());
+    let mut truncated = false;
+    for t in texts {
+        let trimmed = t.trim();
+        let len = trimmed.chars().count();
+        if remaining == 0 {
+            if len > 0 {
+                truncated = true;
+            }
+            budgeted.push(String::new());
+            continue;
+        }
+        if len <= remaining {
+            budgeted.push(trimmed.to_string());
+            remaining -= len;
+        } else {
+            truncated = true;
+            budgeted.push(trimmed.chars().take(remaining).collect());
+            remaining = 0;
+        }
+    }
+    (budgeted, truncated)
+}
+
 /// Translates several bits of text at once, keeping them apart: they go out numbered, in batches of about
 /// TRANSLATE_PIECE characters, all batches at the same time. A batch whose numbering doesn't come back intact is
 /// translated bit by bit instead.
-async fn translate_all(texts: &[String], target: &str) -> Result<Vec<String>, String> {
+async fn translate_all(texts: &[String], target: &str) -> Result<(Vec<String>, bool), String> {
+    if texts.is_empty() {
+        return Ok((vec![], false));
+    }
+    let (budgeted, truncated) = budget_texts(texts, TRANSLATE_MAX);
     if texts.len() == 1 {
-        return Ok(vec![translate(&texts[0], target).await?]);
+        if budgeted[0].is_empty() {
+            return Ok((vec![String::new()], truncated));
+        }
+        return Ok((vec![translate(&budgeted[0], target).await?], truncated));
     }
     let mut batches: Vec<Vec<usize>> = vec![];
     let mut size = 0;
-    for (i, t) in texts.iter().enumerate() {
+    for (i, t) in budgeted.iter().enumerate() {
+        if t.is_empty() {
+            continue;
+        }
         let n = t.chars().count();
-        if batches.is_empty() || size + n > TRANSLATE_PIECE {
+        if batches.is_empty() || size + n + 18 > TRANSLATE_PIECE {
             batches.push(vec![]);
             size = 0;
         }
         batches.last_mut().unwrap().push(i);
-        size += n;
+        size += n + 18;
     }
+    if batches.is_empty() {
+        return Ok((vec![String::new(); texts.len()], truncated));
+    }
+    let budgeted_ref = &budgeted;
     let jobs = batches.into_iter().map(|batch| async move {
+        if batch.len() == 1 {
+            let i = batch[0];
+            return Ok::<_, String>(vec![(i, translate(&budgeted_ref[i], target).await?)]);
+        }
         let joined: String = batch
             .iter()
             .enumerate()
-            .map(|(n, &i)| format!("<p id=\"{}\">{}</p>", n + 1, texts[i].replace("</p>", "< /p>")))
+            .map(|(n, &i)| format!("<p id=\"{}\">{}</p>", n + 1, budgeted_ref[i].replace("</p>", "< /p>")))
             .collect::<Vec<_>>()
             .join("\n");
         let back = translate(&joined, target).await?;
@@ -639,6 +687,20 @@ llega el lunes.");
         assert_eq!(numbered(back, 1).as_deref(), Some("Hello"));
         assert_eq!(numbered(back, 2).as_deref(), Some("How are you?"));
         assert_eq!(numbered(back, 3), None);
+    }
+
+    #[test]
+    fn long_translation_budgets_total_chars_before_tagging() {
+        assert_eq!(TRANSLATE_MAX, 24_000);
+        let (out, trunc) = budget_texts(&["a".repeat(15_000), "b".repeat(12_000), "c".repeat(500)], TRANSLATE_MAX);
+        assert!(trunc);
+        assert_eq!(out[0].chars().count(), 15_000);
+        assert_eq!(out[1].chars().count(), 9_000);
+        assert!(out[2].is_empty());
+
+        let (out2, trunc2) = budget_texts(&["hello".into(), "world".into()], TRANSLATE_MAX);
+        assert!(!trunc2);
+        assert_eq!(out2, vec!["hello".to_string(), "world".to_string()]);
     }
 }
 
