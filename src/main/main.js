@@ -264,5 +264,9 @@ app.whenReady().then(async () => {
   local?.ready({ app, core, windows, store, shell, clipboard });
 });
 
-app.on('before-quit', () => { if (windows) windows.quitting = true; core?.stop(); });
+app.on('before-quit', () => {
+  if (windows) windows.quitting = true;
+  betterClipboard.restoreOsHistorySync();
+  core?.stop();
+});
 app.on('window-all-closed', () => { });
