@@ -230,9 +230,14 @@ async fn stt_once(
                 kind: "error",
             });
         }
-        return Ok(v["result"]["text"].as_str().unwrap_or("").trim().to_string());
+        let text = v["result"]["text"].as_str().ok_or_else(|| PErr {
+            message: "Speech response missing transcript field".into(),
+            kind: "error",
+        })?;
+        return Ok(text.trim().to_string());
     }
     let url = format!("{}/audio/transcriptions", chat_base(c));
+    check_local_only(&url)?;
     let part =
         reqwest::multipart::Part::bytes(wav.to_vec()).file_name("audio.wav").mime_str("audio/wav").unwrap();
     let mut form = reqwest::multipart::Form::new()
@@ -251,7 +256,11 @@ async fn stt_once(
     }
     let body = read(req).await?;
     let v: Value = serde_json::from_str(&body).map_err(|e| PErr { message: e.to_string(), kind: "error" })?;
-    Ok(v["text"].as_str().unwrap_or("").trim().to_string())
+    let text = v["text"].as_str().ok_or_else(|| PErr {
+        message: "Speech response missing transcript field".into(),
+        kind: "error",
+    })?;
+    Ok(text.trim().to_string())
 }
 
 async fn anthropic_chat(
@@ -842,8 +851,37 @@ mod tests {
         let t = Duration::from_secs(15);
         assert_eq!(on_device(&c("http://127.0.0.1:5051/v1"), t), t * 3);
         assert_eq!(on_device(&c("http://localhost:11434/v1"), t), t * 3);
+        assert_eq!(on_device(&c("http://[::1]:11434/v1"), t), t * 3);
         assert_eq!(on_device(&c("https://api.openai.com/v1"), t), t);
         assert_eq!(on_device(&c("https://localhost.example.com/v1"), t), t);
+    }
+
+    #[tokio::test]
+    async fn malformed_stt_response_loses_to_healthy_fallback_and_empty_text_is_preserved() {
+        let (bad, _) = serve(|_, _| (200, r#"{"unexpected":1}"#.into(), 0));
+        let (good, _) = serve(|_, _| (200, r#"{"text":"hello"}"#.into(), 0));
+        let r = handle(json!({
+            "id": 20, "op": "stt", "cands": [cand(&bad, "bad::m"), cand(&good, "good::m")],
+            "wav_b64": "QUJD", "hedge_ms": 5000
+        }))
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["text"], "hello");
+        assert_eq!(r["ref"], "good::m");
+
+        let r_all_bad = handle(json!({
+            "id": 21, "op": "stt", "cands": [cand(&bad, "bad::m")], "wav_b64": "QUJD"
+        }))
+        .await;
+        assert_eq!(r_all_bad["ok"], false, "{r_all_bad}");
+
+        let (empty, _) = serve(|_, _| (200, r#"{"text":""}"#.into(), 0));
+        let r_empty = handle(json!({
+            "id": 22, "op": "stt", "cands": [cand(&empty, "empty::m")], "wav_b64": "QUJD"
+        }))
+        .await;
+        assert_eq!(r_empty["ok"], true, "{r_empty}");
+        assert_eq!(r_empty["text"], "");
     }
 
     const OK: &str = r#"{"choices":[{"message":{"content":"cleaned text"}}],"usage":{"prompt_tokens":12,"completion_tokens":3}}"#;
