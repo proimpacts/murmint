@@ -83,6 +83,7 @@ struct Sess {
     inserted: usize,
     session_text: Vec<String>,
     buffer: Vec<Held>,
+    speech_refs: Vec<String>,
     rt: Option<Rt>,
     pcm: Vec<u8>,
     next_stream: u64,
@@ -110,6 +111,7 @@ static SESS: LazyLock<Mutex<Sess>> = LazyLock::new(|| {
         inserted: 0,
         session_text: vec![],
         buffer: vec![],
+        speech_refs: vec![],
         rt: None,
         pcm: vec![],
         next_stream: 1000,
@@ -713,16 +715,16 @@ pub async fn start(mode: &'static str) {
             hub::prewarm(&r);
         }
     }
-    let mut live: Option<(String, Value)> = None;
-    if c["dictation"]["realtime"] != json!(false) {
-        let lang = crate::accent::language(&c);
+    let (primary, live, batch) = {
         let store = core::get().store.lock().unwrap();
-        if let Some(r) = route::rank_realtime(&store, &lang).first().cloned() {
-            if let Some(cand) = hub::cands(&store, &[r.clone()], "stt").into_iter().next() {
-                live = Some((r, cand));
-            }
-        }
-    }
+        let ranked = route::rank_stt(&store, 5.0);
+        let primary = ranked.first().cloned();
+        let live = primary.as_ref().filter(|r| route::streams(&store, r)).and_then(|r| {
+            hub::cands(&store, std::slice::from_ref(r), "stt").into_iter().next().map(|cand| (r.clone(), cand))
+        });
+        (primary, live, route::batch_refs(&store, ranked))
+    };
+    s().speech_refs = batch;
     if let Some((r, cand)) = live {
         let stream = {
             let mut g = s();
@@ -751,14 +753,8 @@ pub async fn start(mode: &'static str) {
             ),
             None => rt_fail("Live transcription is unavailable"),
         }
-    } else {
-        let warm = {
-            let store = core::get().store.lock().unwrap();
-            route::rank_stt(&store, 5.0).first().cloned()
-        };
-        if let Some(w) = warm {
-            hub::prewarm(&w);
-        }
+    } else if let Some(r) = primary {
+        hub::prewarm(&r);
     }
 
     {
@@ -1253,10 +1249,7 @@ async fn process(seg: Seg) {
         }
         return;
     }
-    let refs = {
-        let st = core::get().store.lock().unwrap();
-        route::rank_stt(&st, seg.duration_sec)
-    };
+    let refs = s().speech_refs.clone();
     let lang = match d["language"].as_str().unwrap_or("auto") {
         "auto" => crate::accent::language(&c),
         picked => picked.to_string(),
@@ -1315,10 +1308,7 @@ pub async fn preview(wav: Vec<u8>, duration_sec: f64) -> String {
         }
     }
     let c = cfg();
-    let refs = {
-        let st = core::get().store.lock().unwrap();
-        route::rank_stt(&st, duration_sec).into_iter().take(1).collect::<Vec<_>>()
-    };
+    let refs = s().speech_refs.first().cloned().into_iter().collect::<Vec<_>>();
     let lang = crate::accent::language(&c);
     let prompt = crate::accent::stt_prompt(&c, duration_sec);
     match hub::transcribe(

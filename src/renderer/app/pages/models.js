@@ -231,7 +231,8 @@
     const job = App.cfg().models[cfgKey];
     const path = `models.${cfgKey}`;
     const value = job.routing === 'manual' ? job.primary : job.routing === 'cheapest' ? CHEAP : AUTO;
-    const ref = job.routing === 'manual' ? job.primary : task === 'stt' ? preview?.stt?.ref : preview?.chat?.[0]?.ref;
+    const ref = task === 'stt' ? preview?.stt?.ref || (job.routing === 'manual' ? job.primary : '') :
+      job.routing === 'manual' ? job.primary : preview?.chat?.[0]?.ref;
     const p = App.providerOfRef(ref);
     const ready = p && (p.id === LOCAL || App.S.providerStatus[p.id]?.ready);
 
@@ -257,9 +258,10 @@
       h('div', { class: 'mjob-now' },
         h('div', { class: 'grow' },
           h('div', { class: 'mjob-model' }, ref ? App.refLabel(ref) : 'Nothing set up yet'),
-          h('div', { class: 'mjob-via' }, h('span', { class: `dot ${ready ? 'good' : 'warn'}` }), ref ? (p?.id === LOCAL ? 'On this computer' : p?.name || 'Removed provider') : 'Add an AI service below')),
+          h('div', { class: 'mjob-via' }, h('span', { class: `dot ${ready ? 'good' : 'warn'}` }), ref ? (p?.id === LOCAL ? 'On this computer' : p?.name || 'Removed provider') : 'Add an AI service below',
+            task === 'stt' && preview?.stt?.stream ? ' · Live' : '')),
         h('div', { class: 'mjob-pickbox' }, UI.select(options, value, pick, 'w-full'), h('span', null, how))));
-    if (job.routing === 'manual' && job.primary !== M1) panel.append(h('div', { class: 'mjob-pick' }, backups(`${path}.fallbacks`, job.fallbacks || [], task, [job.primary])));
+    if (job.routing === 'manual') panel.append(h('div', { class: 'mjob-pick' }, backups(`${path}.fallbacks`, job.fallbacks || [], task, [job.primary])));
     if (extra) panel.append(...[].concat(extra).filter(Boolean));
     return panel;
   }
