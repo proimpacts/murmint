@@ -847,10 +847,15 @@ mod win {
             if p.CompareEndpoints(TextPatternRangeEndpoint_End, outer, TextPatternRangeEndpoint_End).unwrap_or(0) > 0 {
                 let _ = p.MoveEndpointByRange(TextPatternRangeEndpoint_End, outer, TextPatternRangeEndpoint_End);
             }
-            let text = p.GetText(4000).map(|b| b.to_string()).unwrap_or_default();
+            let text = p.GetText(16000).map(|b| b.to_string()).unwrap_or_default();
+            let text_chars = text.chars().count();
             let rects = rects_of(&p);
             if !text.trim().is_empty() && !rects.is_empty() {
-                out.push(serde_json::json!({ "text": text.trim(), "rects": rects }));
+                out.push(serde_json::json!({
+                    "text": text.trim(),
+                    "rects": rects,
+                    "truncated": text_chars >= 16000,
+                }));
             }
             if cur.Move(TextUnit_Paragraph, 1).unwrap_or(0) == 0 {
                 break;
