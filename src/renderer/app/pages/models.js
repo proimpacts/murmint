@@ -97,12 +97,17 @@
       if (!base() || (!k && !preset.keyOptional && !existing)) return;
       const id = ++loadId;
       say(h('span', null, UI.loader('Loading'), ' Loading models…'));
-      const r = existing && !k && !url.value.trim()
-        ? await api.providerModels(existing.id)
-        : await api.listModels({ baseUrl: base(), key: k, type: isClaude() ? 'anthropic' : '', free: !!preset.local });
+      let r;
+      try {
+        r = existing && !k && !url.value.trim()
+          ? await api.providerModels(existing.id)
+          : await api.listModels({ id: existing?.id || '', baseUrl: base(), key: k, type: isClaude() ? 'anthropic' : '', free: !!preset.local });
+      } catch (e) {
+        r = { ok: false, error: e?.message || 'Could not load models' };
+      }
       if (id !== loadId || !rows.isConnected) return;
-      if (!r.ok) { say(r.error, 'bad'); return; }
-      r.models.forEach((m) => { if (!known.has(m.id)) known.set(m.id, m); });
+      if (!r || !r.ok) { say(r?.error || 'Could not load models', 'bad'); return; }
+      (r.models || []).forEach((m) => { if (!known.has(m.id)) known.set(m.id, m); });
       options = [...known.values()].sort((a, b) => a.label.localeCompare(b.label)).map((m) => ({ value: m.id, label: m.label + (m.task === 'stt' ? ' (speech)' : '') }));
       redraw();
       say(`${options.length} models`);
@@ -336,19 +341,26 @@
     note.replaceChildren(UI.loader('Loading'), ' Loading the full list…');
     api.providerModels(p.id).then((r) => {
       if (!box.isConnected) return;
-      if (!r.ok) { note.textContent = r.error; return; }
-      r.models.forEach((m) => { if (!known.has(m.id)) known.set(m.id, m); });
+      if (!r || !r.ok) { note.textContent = r?.error || 'Could not load models'; return; }
+      (r.models || []).forEach((m) => { if (!known.has(m.id)) known.set(m.id, m); });
       note.textContent = `${known.size} models`;
       draw();
+    }).catch(() => {
+      if (!box.isConnected) return;
+      note.textContent = 'Could not load models';
     });
     const add = UI.btn('Add selected', { variant: 'sm primary', onClick: async () => {
       add.disabled = true;
+      const existingMap = new Map((p.models || []).map((m) => [m.id, m]));
       const picked = [...known.values()].filter((m) => refs.has(`${p.id}::${m.id}`));
-      // keep the provider's own models and add any new picks to it
-      const models = [...p.models, ...picked.filter((m) => !p.models.some((x) => x.id === m.id)).map((m) => ({ tier: 'decent', ...m }))];
-      await api.saveProvider({ ...p, models });
-      await api.set('shownModels', [...(App.cfg().shownModels || []).filter((r) => !r.startsWith(p.id + '::')), ...refs]);
-      UI.toast(`${refs.size} model${refs.size === 1 ? '' : 's'} from ${p.name}`, 'ok');
+      const models = picked.map((m) => existingMap.get(m.id) || { tier: 'decent', ...m });
+      const checkedIds = new Set(models.map((m) => m.id));
+      const removedModels = new Set(p.removedModels || []);
+      for (const m of p.models || []) if (!checkedIds.has(m.id)) removedModels.add(m.id);
+      for (const id of checkedIds) removedModels.delete(id);
+      await api.saveProvider({ ...p, models, removedModels: [...removedModels] });
+      await api.set('shownModels', [...(App.cfg().shownModels || []).filter((r) => !r.startsWith(p.id + '::')), ...models.map((m) => `${p.id}::${m.id}`)]);
+      UI.toast(`${models.length} model${models.length === 1 ? '' : 's'} from ${p.name}`, 'ok');
       await refresh();
     } });
     box.append(search, list, h('div', { class: 'mmenu-foot' }, count, note, h('span', { class: 'grow' }), add));
