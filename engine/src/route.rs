@@ -106,27 +106,16 @@ pub fn decide(d: &DecideIn) -> Decision {
     }
 }
 
-fn unpriced(c: &Cand) -> bool {
-    let p = &c.model["price"];
-    !(p["perMinute"].as_f64().unwrap_or(0.0) > 0.0
-        || p["inPerM"].as_f64().unwrap_or(0.0) > 0.0
-        || p["outPerM"].as_f64().unwrap_or(0.0) > 0.0)
-        && c.provider["keyOptional"] != json!(true)
+fn price(c: &Cand, field: &str, estimate: f64) -> f64 {
+    c.model["price"][field].as_f64().unwrap_or_else(|| {
+        if c.provider["keyOptional"] == json!(true) { 0.0 } else { estimate }
+    })
 }
 fn chat_cost(c: &Cand, tin: f64, tout: f64) -> f64 {
-    let (i, o) = if unpriced(c) {
-        (1.0, 1.0)
-    } else {
-        (
-            c.model["price"]["inPerM"].as_f64().unwrap_or(0.0),
-            c.model["price"]["outPerM"].as_f64().unwrap_or(0.0),
-        )
-    };
-    (i * tin + o * tout) / 1e6
+    (price(c, "inPerM", 1.0) * tin + price(c, "outPerM", 1.0) * tout) / 1e6
 }
 fn stt_cost(c: &Cand, sec: f64) -> f64 {
-    let per_min = if unpriced(c) { 0.01 } else { c.model["price"]["perMinute"].as_f64().unwrap_or(0.0) };
-    per_min * sec / 60.0
+    price(c, "perMinute", 0.01) * sec / 60.0
 }
 
 #[derive(Clone)]
@@ -202,7 +191,10 @@ pub fn rank_stt(store: &Store, sec: f64) -> Vec<String> {
     let m = &store.config["models"]["stt"];
     let lang = crate::accent::language(&store.config);
     let lang = lang.as_str();
-    let cands = candidates(store, "stt");
+    let live_enabled = store.config["dictation"]["realtime"] != json!(false);
+    let cands: Vec<_> = candidates(store, "stt").into_iter()
+        .filter(|c| c.model["realtime"] != "live" || (live_enabled && c.provider["type"] != "cloudflare"))
+        .collect();
     if m["routing"] == "manual" {
         let mut refs = vec![m["primary"].as_str().unwrap_or("").to_string()];
         refs.extend(strings(&m["fallbacks"]));
@@ -218,27 +210,15 @@ pub fn rank_stt(store: &Store, sec: f64) -> Vec<String> {
     ranked.into_iter().map(|i| i.r).collect()
 }
 
-pub fn rank_realtime(store: &Store, lang: &str) -> Vec<String> {
-    let english = lang == "en";
-    let m = &store.config["models"]["stt"];
-    let mut items: Vec<(i32, i32, i64, String)> = candidates(store, "stt")
-        .iter()
-        .filter(|c| {
-            !c.model["realtime"].is_null()
-                && c.provider["type"] != "cloudflare"
-                && (c.model["englishOnly"] != json!(true) || english)
+pub fn streams(store: &Store, r: &str) -> bool {
+    store.config["dictation"]["realtime"] != json!(false)
+        && store.find_model(r).is_some_and(|(p, m)| {
+            p["type"] != "cloudflare" && matches!(m["realtime"].as_str(), Some("live" | "turn"))
         })
-        .map(|c| {
-            (
-                if m["routing"] == "manual" && m["primary"] == c.r { 0 } else { 1 },
-                if c.model["realtime"] == "live" { 0 } else { 1 },
-                -tier_rank(&c.model["tier"]),
-                c.r.clone(),
-            )
-        })
-        .collect();
-    items.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
-    items.into_iter().map(|x| x.3).collect()
+}
+
+pub fn batch_refs(store: &Store, refs: Vec<String>) -> Vec<String> {
+    refs.into_iter().filter(|r| store.find_model(r).is_some_and(|(_, m)| m["realtime"] != "live")).collect()
 }
 
 pub fn est_chat(store: &Store, r: &str, tin: f64, tout: f64) -> f64 {
@@ -256,7 +236,7 @@ pub fn preview(store: &Store) -> Value {
     }
     let stt = rank_stt(store, 5.0)
         .first()
-        .map(|r| json!({ "ref": r, "cost": est_stt(store, r, 5.0) }))
+        .map(|r| json!({ "ref": r, "cost": est_stt(store, r, 5.0), "stream": streams(store, r) }))
         .unwrap_or(Value::Null);
     json!({ "chat": chat, "stt": stt })
 }
@@ -345,12 +325,20 @@ mod tests {
     }
 
     #[test]
-    fn speech_models_and_live_models() {
-        let s = store_with(&["openai", "cloudflare"]);
-        assert!(!rank_stt(&s, 5.0).is_empty());
-        let live = rank_realtime(&s, "auto");
-        assert_eq!(live[0], "openai::gpt-live-transcribe", "{live:?}");
-        assert!(live.iter().all(|r| r.starts_with("openai::")), "Cloudflare cannot stream");
+    fn speech_transport_follows_the_selected_model() {
+        let mut s = store_with(&["openai", "cloudflare"]);
+        s.set("models.stt", json!({
+            "routing": "manual", "primary": "cloudflare::@cf/openai/whisper", "fallbacks": []
+        }));
+        let refs = rank_stt(&s, 5.0);
+        assert_eq!(refs, ["cloudflare::@cf/openai/whisper"]);
+        assert!(!streams(&s, &refs[0]));
+        s.set("models.stt.primary", json!("openai::gpt-live-transcribe"));
+        let refs = rank_stt(&s, 5.0);
+        assert!(streams(&s, &refs[0]));
+        assert!(batch_refs(&s, refs).is_empty());
+        s.set("models.stt.routing", json!("cheapest"));
+        assert!(!streams(&s, &rank_stt(&s, 5.0)[0]));
     }
 
     #[test]
