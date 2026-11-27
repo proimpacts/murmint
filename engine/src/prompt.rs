@@ -100,7 +100,11 @@ Never
         format!("- Never translate. Write in the language it was spoken in{lang}; when the speaker mixes languages, keep each part in its own language."),
         "".into(),
         format!("Strength: {}", INTENSITY[p.intensity.clamp(0, 3) as usize]),
-        format!("Where it is going{}: {}", if p.app_name.is_empty() { String::new() } else { format!(" ({})", p.app_name) }, kind_text(p.kind)),
+        format!(
+            "Where it is going{}: {}",
+            if p.app_name.is_empty() { String::new() } else { format!(" ({})", p.app_name) },
+            kind_text(if p.app_name.is_empty() && matches!(p.kind, "discord" | "slack") { "chat" } else { p.kind })
+        ),
     ];
     if !p.excluded.is_empty() {
         l.push(format!("Never write any of these words, phrases or characters: {}. Say the same thing another way without them.", p.excluded.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(" ")));
@@ -529,6 +533,51 @@ mod tests {
         );
         assert_eq!(shots(true, false).len(), base + 1);
         assert_eq!(shots(false, true).len(), base + 1);
+    }
+
+    #[test]
+    fn empty_app_name_uses_generic_kind_guidance_without_app_names() {
+        let style = json!({ "name": "Natural", "instruction": "" });
+        for kind in ["slack", "discord"] {
+            let p = build_system_prompt(&PromptIn {
+                style: &style,
+                intensity: 2,
+                kind,
+                app_name: "",
+                instruction: "",
+                global_instruction: "",
+                vocabulary: &[],
+                language: "auto",
+                excluded: &[],
+                humanize: "off",
+                wants_list: false,
+                has_context: false,
+                better_prompts: true,
+                auto_detect: false,
+            });
+            let low = p.to_lowercase();
+            assert!(!low.contains("slack"), "{kind}: {p}");
+            assert!(!low.contains("discord"), "{kind}: {p}");
+            assert!(!low.contains("mrkdwn"), "{kind}: {p}");
+            assert!(p.contains("Chat message:"), "{kind}: {p}");
+        }
+        let with_slack = build_system_prompt(&PromptIn {
+            style: &style,
+            intensity: 2,
+            kind: "slack",
+            app_name: "Slack",
+            instruction: "",
+            global_instruction: "",
+            vocabulary: &[],
+            language: "auto",
+            excluded: &[],
+            humanize: "off",
+            wants_list: false,
+            has_context: false,
+            better_prompts: false,
+            auto_detect: false,
+        });
+        assert!(with_slack.contains("Slack"));
     }
 
     /// Prints the whole prompt for one case, to read it: cargo test print_the_prompt -- --ignored --nocapture
