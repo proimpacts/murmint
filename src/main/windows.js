@@ -45,7 +45,11 @@ class Windows {
     this.main.loadFile(R('app', 'index.html'), MICA ? { query: { mica: '1' } } : undefined);
     this.main.once('ready-to-show', () => { if (show) this.main.show(); });
     this.main.webContents.setWindowOpenHandler(({ url }) => { if (/^https:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
-    this.main.on('closed', () => { this.main = null; if (this.afterClose) this.afterClose(); });
+    this.main.on('closed', () => {
+      this.main = null;
+      if (this.afterClose) this.afterClose();
+      this.onMainClosed?.();
+    });
     return this.main;
   }
 

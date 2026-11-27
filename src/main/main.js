@@ -216,6 +216,8 @@ app.whenReady().then(async () => {
   shell.config = shell.config || shell.state.config;
   windows = new Windows(store);
   windows.onRaise = (hwnd) => core.ui('overlay:raise', hwnd).catch(() => {});
+  windows.onOverlayLost = () => { if (capture) { const sid = capture.sid; capture = null; core.send('rec:error', 'Overlay restarted', sid); core.ui('session:action', 'cancel').catch(() => {}); } };
+  windows.onMainClosed = () => { if (!windows.quitting && shell.config?.general?.runInBackground === false) app.quit(); };
   migrateSecrets();
   await migrateAccount(dataDir);
 
