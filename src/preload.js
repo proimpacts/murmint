@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('murmintIpc', {
   checkUpdate: () => invoke('update:check'),
   getUpdate: () => invoke('update:get'),
   deleteHistory: (id) => invoke('history:delete', id),
+  queryHistory: (q) => invoke('history:query', q),
   copyText: (text) => invoke('clipboard:write', text),
   usage: () => invoke('usage:summary'),
   routerPreview: () => invoke('router:preview'),

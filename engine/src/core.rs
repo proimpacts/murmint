@@ -30,7 +30,7 @@ pub fn push(ch: &str, to: &str, payload: Value) {
 
 pub fn state_for_renderer() -> Value {
     let c = get();
-    let (cfg, status, history) = {
+    let (cfg, status, history, history_total, history_words) = {
         let s = c.store.lock().unwrap();
         let mut status = serde_json::Map::new();
         for p in s.providers() {
@@ -38,10 +38,20 @@ pub fn state_for_renderer() -> Value {
             status
                 .insert(id.to_string(), json!({ "hasKey": s.has_secret(id), "ready": s.provider_ready(id) }));
         }
-        (s.config.clone(), Value::Object(status), s.history.iter().take(300).cloned().collect::<Vec<_>>())
+        let history_total = s.history.len();
+        let history_words: u64 = s.history.iter().map(|h| h["words"].as_u64().unwrap_or(0)).sum();
+        (
+            s.config.clone(),
+            Value::Object(status),
+            s.history.iter().take(300).cloned().collect::<Vec<_>>(),
+            history_total,
+            history_words,
+        )
     };
     json!({
         "config": cfg, "providerStatus": status, "suggestions": [], "history": history,
+        "historyTotal": history_total,
+        "historyWords": history_words,
         "session": crate::session::summary(),
         "helperReady": *c.helper_ready.lock().unwrap(),
         "version": *c.version.lock().unwrap(),

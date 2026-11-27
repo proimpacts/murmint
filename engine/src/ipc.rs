@@ -205,10 +205,13 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
             changed("history");
             json!(true)
         }
+        "history:query" => with_store(|s| query_history(&s.history, &arg(0))),
         "clipboard:write" => {
             let t = arg(0).as_str().unwrap_or("").to_string();
-            tokio::task::spawn_blocking(move || insertion::write_clipboard_text(&t)).await.ok();
-            json!(true)
+            let ok = tokio::task::spawn_blocking(move || insertion::write_clipboard_text(&t))
+                .await
+                .unwrap_or(false);
+            json!(ok)
         }
         "overlay:raise" => {
             crate::native::raise_under_taskbar(arg(0).as_i64().unwrap_or(0) as isize);
@@ -429,43 +432,135 @@ async fn provider_models(id: &str) -> Value {
     list_models(p["baseUrl"].as_str().unwrap_or(""), &key, p["type"] == "anthropic", p["free"] == json!(true)).await
 }
 
+fn sanitize_api_key(raw: &str, cloudflare: bool) -> Result<String, String> {
+    let stripped: String = raw
+        .chars()
+        .filter(|c| !matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{2060}'))
+        .collect();
+    let key = if cloudflare {
+        clean_token(&stripped)
+    } else {
+        crate::re!(r"(?i)^bearer\s+").replace(stripped.trim(), "").trim().to_string()
+    };
+    if key.chars().any(|c| !c.is_ascii() || c.is_ascii_control()) {
+        return Err("API key contains invalid characters".to_string());
+    }
+    Ok(key)
+}
+
+fn query_history(history: &[Value], opts: &Value) -> Value {
+    let q = opts["query"].as_str().unwrap_or("").trim().to_lowercase();
+    let offset = opts["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = opts["limit"].as_u64().unwrap_or(100).clamp(1, 500) as usize;
+
+    let all_total = history.len();
+    let all_words: u64 = history.iter().map(|h| h["words"].as_u64().unwrap_or(0)).sum();
+
+    let matched: Vec<&Value> = history
+        .iter()
+        .filter(|h| {
+            if q.is_empty() {
+                return true;
+            }
+            let text = h["text"].as_str().unwrap_or("");
+            let edited = h["edited"].as_str().unwrap_or("");
+            let app = h["app"].as_str().unwrap_or("");
+            format!("{text} {edited} {app}").to_lowercase().contains(&q)
+        })
+        .collect();
+
+    let total = matched.len();
+    let total_words: u64 = matched.iter().map(|h| h["words"].as_u64().unwrap_or(0)).sum();
+    let items: Vec<Value> = matched.into_iter().skip(offset).take(limit).cloned().collect();
+    let has_more = offset.saturating_add(items.len()) < total;
+
+    json!({
+        "items": items,
+        "total": total,
+        "totalWords": total_words,
+        "allTotal": all_total,
+        "allWords": all_words,
+        "hasMore": has_more,
+    })
+}
+
 /// The models a server offers, for a saved service or one still being filled in.
 async fn list_models(base: &str, key: &str, anthropic: bool, free: bool) -> Value {
     let base = base.trim().trim_end_matches('/');
     if base.is_empty() {
         return json!({ "ok": false, "error": "Add the base URL first" });
     }
-    let url = format!("{base}/models{}", if anthropic { "?limit=1000" } else { "" });
-    let mut req = crate::CLIENT.get(url).timeout(std::time::Duration::from_secs(15));
-    if anthropic {
-        req = req.header("x-api-key", key).header("anthropic-version", "2023-06-01");
-    } else if !key.is_empty() {
-        req = req.bearer_auth(key);
-    }
-    match req.send().await {
-        Ok(res) => {
-            let st = res.status().as_u16();
-            if !(200..300).contains(&st) {
-                let error = if st == 401 || st == 403 {
-                    "The provider rejected the key. Save a valid key first.".to_string()
+    let local = base.contains("localhost") || base.contains("127.0.0.1") || base.contains("[::1]");
+    let mut all_models: Vec<Value> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::<String>::new();
+    let mut seen_cursors = std::collections::HashSet::<String>::new();
+    let mut after_id: Option<String> = None;
+    let max_pages = if anthropic { 10 } else { 1 };
+
+    for _ in 0..max_pages {
+        let mut req = crate::CLIENT
+            .get(format!("{base}/models"))
+            .timeout(std::time::Duration::from_secs(15));
+        if anthropic {
+            let mut q: Vec<(&str, &str)> = vec![("limit", "1000")];
+            if let Some(cursor) = after_id.as_deref() {
+                q.push(("after_id", cursor));
+            }
+            req = req
+                .query(&q)
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01");
+        } else if !key.is_empty() {
+            req = req.bearer_auth(key);
+        }
+        let res = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let error = if e.is_connect() {
+                    "Could not reach the server. Is it running?".to_string()
                 } else {
-                    format!("The provider answered {st}")
+                    e.without_url().to_string()
                 };
                 return json!({ "ok": false, "error": error });
             }
-            let body: Value = res.json().await.unwrap_or(Value::Null);
-            let local = base.contains("localhost") || base.contains("127.0.0.1");
-            json!({ "ok": true, "models": presets::parse_model_list(&body, local || free) })
-        }
-        Err(e) => {
-            let error = if e.is_connect() {
-                "Could not reach the server. Is it running?".to_string()
+        };
+        let st = res.status().as_u16();
+        if !(200..300).contains(&st) {
+            let error = if st == 401 || st == 403 {
+                "The provider rejected the key. Save a valid key first.".to_string()
             } else {
-                e.without_url().to_string()
+                format!("The provider answered {st}")
             };
-            json!({ "ok": false, "error": error })
+            return json!({ "ok": false, "error": error });
         }
+        let Ok(body) = res.json::<Value>().await else {
+            return json!({ "ok": false, "error": "The server returned an invalid model list." });
+        };
+        let valid_shape = body.is_array() || body["data"].is_array() || body["models"].is_array();
+        if !valid_shape {
+            return json!({ "ok": false, "error": "The server returned an unexpected model list format." });
+        }
+        for m in presets::parse_model_list(&body, local || free) {
+            if let Some(id) = m["id"].as_str() {
+                if seen_ids.insert(id.to_string()) {
+                    all_models.push(m);
+                }
+            }
+        }
+        if !anthropic || body["has_more"] != json!(true) {
+            break;
+        }
+        let next = body["last_id"].as_str().unwrap_or("").trim().to_string();
+        if next.is_empty() || !seen_cursors.insert(next.clone()) {
+            break;
+        }
+        after_id = Some(next);
     }
+
+    all_models.sort_by(|a, b| {
+        a["id"].as_str().unwrap_or("").to_lowercase().cmp(&b["id"].as_str().unwrap_or("").to_lowercase())
+    });
+    json!({ "ok": true, "models": all_models })
 }
 
 async fn train_take(t: &Value) -> Value {
@@ -509,5 +604,104 @@ mod tests {
         let id = "0123456789abcdef0123456789abcdef";
         assert_eq!(parse_account_id(&format!("https://dash.cloudflare.com/{id}/ai")), id);
         assert_eq!(parse_account_id("nope"), "nope");
+    }
+
+    #[test]
+    fn api_key_sanitization_strips_zero_width_and_rejects_invalid_chars() {
+        assert_eq!(sanitize_api_key("  Bearer \u{200B}sk-abc123  ", false).unwrap(), "sk-abc123");
+        assert!(sanitize_api_key("sk-abc\ndef", false).is_err());
+        assert!(sanitize_api_key("sk-abc—def", false).is_err());
+        assert_eq!(sanitize_api_key("", false).unwrap(), "");
+    }
+
+    #[test]
+    fn query_history_searches_and_pages_beyond_300_entries() {
+        let rows: Vec<Value> = (0..305)
+            .map(|i| {
+                json!({
+                    "id": format!("id-{i}"),
+                    "text": if i == 304 { "needle old entry" } else { "ordinary dictation" },
+                    "app": "Notepad",
+                    "words": 2
+                })
+            })
+            .collect();
+
+        let p1 = query_history(&rows, &json!({ "query": "", "offset": 0, "limit": 200 }));
+        assert_eq!(p1["allTotal"], 305);
+        assert_eq!(p1["allWords"], 610);
+        assert_eq!(p1["total"], 305);
+        assert_eq!(p1["items"].as_array().unwrap().len(), 200);
+        assert_eq!(p1["hasMore"], true);
+
+        let p2 = query_history(&rows, &json!({ "query": "", "offset": 200, "limit": 200 }));
+        assert_eq!(p2["items"].as_array().unwrap().len(), 105);
+        assert_eq!(p2["hasMore"], false);
+
+        let search = query_history(&rows, &json!({ "query": "needle", "offset": 0, "limit": 50 }));
+        assert_eq!(search["total"], 1);
+        assert_eq!(search["totalWords"], 2);
+        assert_eq!(search["allTotal"], 305);
+        assert_eq!(search["items"][0]["id"], "id-304");
+        assert_eq!(search["hasMore"], false);
+    }
+
+    #[tokio::test]
+    async fn list_models_paginates_anthropic_and_rejects_malformed_200() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let first_line = req.lines().next().unwrap_or("");
+                let body = if first_line.contains("/bad/models") {
+                    "<html>login</html>".to_string()
+                } else if first_line.contains("after_id=m2") {
+                    json!({
+                        "data": [
+                            { "id": "m2", "display_name": "Model 2" },
+                            { "id": "m3", "display_name": "Model 3" }
+                        ],
+                        "has_more": false
+                    })
+                    .to_string()
+                } else {
+                    json!({
+                        "data": [
+                            { "id": "m1", "display_name": "Model 1" },
+                            { "id": "m2", "display_name": "Model 2" }
+                        ],
+                        "has_more": true,
+                        "last_id": "m2"
+                    })
+                    .to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let ok = list_models(&format!("http://{addr}"), "k", true, false).await;
+        assert_eq!(ok["ok"], true);
+        let ids: Vec<&str> = ok["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["m1", "m2", "m3"]);
+
+        let bad = list_models(&format!("http://{addr}/bad"), "k", false, false).await;
+        assert_eq!(bad["ok"], false);
+        srv.abort();
     }
 }
