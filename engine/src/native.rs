@@ -723,7 +723,10 @@ mod win {
                         return if outside { Read::Skip } else { Read::Text(text) };
                     }
                     match value {
-                        Some(value) => Read::Text(before_caret_in_edit(el, &value).unwrap_or(value)),
+                        Some(value) => match before_caret_in_edit(el, &value) {
+                            Some(prefix) => Read::Text(prefix),
+                            None => Read::Skip,
+                        },
                         None => Read::TryAgain,
                     }
                 }
