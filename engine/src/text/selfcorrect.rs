@@ -44,6 +44,39 @@ fn is_strong(m: &str) -> bool {
 fn words(s: &str) -> Vec<&str> {
     s.split_whitespace().collect()
 }
+
+fn scan(s: &str) -> Vec<(usize, usize, &str)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (idx, ch) in s.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(st) = start.take() {
+                out.push((st, idx, &s[st..idx]));
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+    if let Some(st) = start {
+        out.push((st, s.len(), &s[st..]));
+    }
+    out
+}
+
+fn split_sentence_tail(before: &str) -> (&str, &str) {
+    let abbrev = re!(r"(?i)\b(?:[ap]\.m|e\.g|i\.e|etc|vs|mr|mrs|ms|dr|prof|st|fig|approx|inc|ltd)\.\s*$");
+    let mut split_at = 0;
+    for m in re!(r"[.!?]\s+").find_iter(before).flatten() {
+        let up_to_end = &before[..m.end()];
+        let punct = before[m.start()..].chars().next().unwrap_or('.');
+        if punct == '.' && is_match(abbrev, up_to_end) {
+            continue;
+        }
+        split_at = m.end();
+    }
+    (&before[..split_at], &before[split_at..])
+}
+
 fn bare(w: &str) -> String {
     w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase()
 }
@@ -102,23 +135,18 @@ fn fix(before: &str, tail: &str, kind: &str) -> Option<String> {
     if tw.is_empty() {
         return None;
     }
-    let new_sentence = is_match(re!(r"[.!?]\s*$"), before) && !is_match(re!(r"(?i)\b[ap]\.m\.\s*$"), before);
+    let (earlier_sentences, cur_before) = split_sentence_tail(before);
+    let new_sentence = is_match(re!(r"[.!?]\s*$"), cur_before) && !is_match(re!(r"(?i)\b[ap]\.m\.\s*$"), cur_before);
     let refers_back = is_match(re!(r"(?i)^(?:to\s+)?(?:say|write|type|send|put)\b"), tail.trim_start());
+    let bw = scan(cur_before);
 
     if tw.len() >= 3 && !refers_back {
         let (w1, w2) = (bare(tw[0]), bare(tw[1]));
-        let bw: Vec<(usize, &str)> = before
-            .split_whitespace()
-            .scan(0usize, |pos, w| {
-                let start = before[*pos..].find(w).map(|i| i + *pos).unwrap();
-                *pos = start + w.len();
-                Some((start, w))
-            })
-            .collect();
         for i in (0..bw.len().saturating_sub(1)).rev() {
-            if bare(bw[i].1) == w1 && bare(bw[i + 1].1) == w2 {
+            if bare(bw[i].2) == w1 && bare(bw[i + 1].2) == w2 {
                 let rest = strip_tail_filler(tail);
-                return Some(format!("{}{}", &before[..bw[i].0], rest).trim().to_string());
+                let cur = format!("{}{}", &cur_before[..bw[i].0], rest);
+                return Some(format!("{earlier_sentences}{}", cur.trim()).trim().to_string());
             }
         }
     }
@@ -136,32 +164,30 @@ fn fix(before: &str, tail: &str, kind: &str) -> Option<String> {
         // word number must lead, or "the other one" counts
         let in_words = !newn.as_str().starts_with(|c: char| c.is_ascii_digit());
         if words(lead).len() <= 2 && !is_match(re!(r"[.!?]"), lead) && (!in_words || lead.trim().is_empty()) {
-            let last = num.find_iter(before).flatten().last();
+            let last = num.find_iter(cur_before).flatten().last();
             if let Some(old) = last {
                 let rest =
                     strip_tail_filler(after.trim_start_matches(|c: char| c == ',' || c.is_whitespace()));
-                let old_after = before[old.end()..].trim().to_lowercase();
+                let old_after = cur_before[old.end()..].trim().to_lowercase();
                 let joined = if rest.is_empty() || rest.to_lowercase() == old_after {
                     String::new()
+                } else if rest.starts_with(['.', '!', '?', ',', ';', ':']) {
+                    rest
                 } else {
                     format!(" {rest}")
                 };
-                return Some(
-                    format!("{}{}{}{}", &before[..old.start()], newn.as_str(), &before[old.end()..], joined)
-                        .trim()
-                        .to_string(),
-                );
+                let cur = format!("{}{}{}{}", &cur_before[..old.start()], newn.as_str(), &cur_before[old.end()..], joined);
+                return Some(format!("{earlier_sentences}{}", cur.trim()).trim().to_string());
             }
         }
     }
 
-    let bwords = words(before);
     for n in 1..=3usize {
-        if tw.len() < n || bwords.len() < n {
+        if tw.len() < n || bw.len() < n {
             break;
         }
         let y: String = tw[..n].iter().map(|w| bare(w)).collect::<Vec<_>>().join(" ");
-        let x: String = bwords[bwords.len() - n..].iter().map(|w| bare(w)).collect::<Vec<_>>().join(" ");
+        let x: String = bw[bw.len() - n..].iter().map(|w| bare(w.2)).collect::<Vec<_>>().join(" ");
         if y.is_empty() || x.is_empty() {
             continue;
         }
@@ -174,15 +200,12 @@ fn fix(before: &str, tail: &str, kind: &str) -> Option<String> {
         if !swap_ok || y == x {
             continue;
         }
-        let keep = before[..before.len() - bwords[bwords.len() - n..].join(" ").len()].to_string();
+        let keep = &cur_before[..bw[bw.len() - n].0];
         let y_text = tw[..n].join(" ");
         let y_text = y_text.trim_end_matches(|c: char| c == ',' || c == ';');
         let rest = tw[n..].join(" ");
-        return Some(
-            format!("{keep}{y_text}{}", if rest.is_empty() { String::new() } else { format!(" {rest}") })
-                .trim()
-                .to_string(),
-        );
+        let cur = format!("{keep}{y_text}{}", if rest.is_empty() { String::new() } else { format!(" {rest}") });
+        return Some(format!("{earlier_sentences}{}", cur.trim()).trim().to_string());
     }
     None
 }
@@ -238,11 +261,24 @@ mod tests {
             "I meant to say Tuesday, not Monday.",
             "Oops. I mean the blue one.",
             "That was a typo. Sorry, Maria.",
+            "We should ship it. Ask Tom, actually we should wait.",
+            "The limit is 5 items. Ask Tom, sorry 2 copies.",
         ] {
             assert_eq!(f(s), s, "{s}");
         }
         assert_eq!(f("send it to Sam, no wait, Maria"), "send it to Maria");
         assert!(f("Let's meet at 8. No wait, let's meet at 9.").eq_ignore_ascii_case("let's meet at 9."));
+        assert_eq!(f("The limit is 5 items. Bring 3, sorry 2 copies."), "The limit is 5 items. Bring 2 copies.");
+        assert_eq!(f("First sentence. Dr. Smith wants 3, no wait, 4."), "First sentence. Dr. Smith wants 4.");
+    }
+
+    #[test]
+    fn multibyte_utf8_and_extra_whitespace_never_panic() {
+        assert_eq!(f("über  car, I mean over car"), "over car");
+        assert_eq!(f("“hello”\r\nmy car, I mean the car"), "“hello”\r\nmy car, I mean the car");
+        assert_eq!(f("“hello”\r\nmy blue car, no wait, my blue truck"), "“hello”\r\nmy blue truck");
+        assert_eq!(f("“hello”\r\nüber  car, I mean over car"), "“hello”\r\nover car");
+        assert_eq!(f("“hello”\r\n\tüber\t\tcar, I mean over car"), "“hello”\r\n\tover car");
     }
 
     #[test]
