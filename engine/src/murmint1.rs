@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -153,7 +153,9 @@ fn report(change: impl FnOnce(&mut Progress)) {
         change(&mut g);
         g.clone()
     };
-    core::push("local:progress", "main", status_of(&p));
+    if core::try_get().is_some() {
+        core::push("local:progress", "main", status_of(&p));
+    }
 }
 
 fn gb(n: u64) -> String {
@@ -517,6 +519,7 @@ pub fn stop() {
         r.server.ready.store(false, Ordering::SeqCst);
         if let Some(mut c) = r.server.child.lock().unwrap().take() {
             let _ = c.kill();
+            let _ = c.wait();
         }
     }
 }
@@ -549,10 +552,23 @@ fn launch(server: Arc<Server>, generation: u64) {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             no_window(&mut cmd);
-            let Ok(child) = cmd.spawn() else { continue };
+            let Ok(mut child) = cmd.spawn() else { continue };
+            if !alive() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
             tie_to_engine(&child);
             server.port.store(port as u64, Ordering::SeqCst);
-            *server.child.lock().unwrap() = Some(child);
+            {
+                let mut slot = server.child.lock().unwrap();
+                if !alive() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                *slot = Some(child);
+            }
             let s = server.clone();
             rt.spawn(async move {
                 if poll_until_up(port).await && GENERATION.load(Ordering::SeqCst) == generation {
@@ -563,6 +579,13 @@ fn launch(server: Arc<Server>, generation: u64) {
             loop {
                 std::thread::sleep(Duration::from_millis(400));
                 let mut slot = server.child.lock().unwrap();
+                if !alive() {
+                    if let Some(mut c) = slot.take() {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
+                    return;
+                }
                 match slot.as_mut().map(|c| c.try_wait()) {
                     Some(Ok(None)) => continue,
                     _ => {
