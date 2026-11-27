@@ -21,10 +21,17 @@
     const panel = h('div', { class: 'preset-edit' },
       h('div', { class: 'd' }, 'What the AI is told when this style is on. Edit freely.'),
       UI.textarea({ value: st.instruction, rows: 3, onInput: (v) => { st.instruction = v; save(v); } }),
-      !st.builtin ? h('div', null, UI.btn('Delete style', { variant: 'ghost danger sm', onClick: () => { App.set('styles', cfg.styles.filter((x) => x.id !== st.id)); if (cfg.formatting.style === st.id) App.set('formatting.style', 'natural');
+      !st.builtin ? h('div', null, UI.btn('Delete style', { variant: 'ghost danger sm', onClick: async () => {
+          const cur = App.cfg();
+          App.set('styles', cur.styles.filter((x) => x.id !== st.id));
+          if (cur.formatting.style === st.id) App.set('formatting.style', 'natural');
           // apps that used this style go back to their own default
-          for (const [id, ov] of Object.entries(cfg.appOverrides || {})) if (ov && ov.style === st.id) App.set(`appOverrides.${id}.style`, '');
-          (cfg.appProfiles || []).forEach((ap, i) => { if (ap.custom && ap.style === st.id) App.set(`appProfiles.${i}.style`, ''); }); editId = null; App.render(); } })) : null);
+          for (const [id, ov] of Object.entries(cur.appOverrides || {})) if (ov && ov.style === st.id) App.set(`appOverrides.${id}.style`, '');
+          const nextProfiles = (cur.appProfiles || []).map((p) => (p.style === st.id ? { ...p, style: '' } : p));
+          await App.set('appProfiles', nextProfiles);
+          editId = null;
+          App.render();
+        } })) : null);
     return [row, panel];
   }
 
