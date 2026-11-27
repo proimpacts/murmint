@@ -21,6 +21,11 @@ class Windows {
     this.overlay = null;
     this.tray = null;
     this.quitting = false;
+    this._overlayQueue = [];
+    this._overlayLoaded = false;
+    this._overlayReady = null;
+    this._resolveOverlayReady = null;
+    this._rebuildTimer = null;
   }
 
   resolvedTheme() {
@@ -61,21 +66,52 @@ class Windows {
   }
 
   createOverlay() {
+    clearTimeout(this._rebuildTimer);
+    this._rebuildTimer = null;
+    this._rebuilding = false;
     this.baseW = 380; this.baseH = 340; this.scale = 1;
     this.OW = this.baseW; this.OH = this.baseH;
-    this.overlay = new BrowserWindow({
+    this._overlayLoaded = false;
+    this._overlayReady = new Promise((resolve) => { this._resolveOverlayReady = resolve; });
+    const o = this.overlay = new BrowserWindow({
       width: this.OW, height: this.OH, show: false, frame: false, transparent: true, resizable: false, movable: false,
       skipTaskbar: true, alwaysOnTop: true, focusable: false, hasShadow: false, fullscreenable: false,
       webPreferences: { preload: path.join(__dirname, '..', 'preload.js'), contextIsolation: true, sandbox: true, backgroundThrottling: false },
     });
     this._raiseOverlay();
-    this.overlay.setIgnoreMouseEvents(true, { forward: true });
-    this.overlay.loadFile(R('overlay', 'index.html'));
+    o.setIgnoreMouseEvents(true, { forward: true });
+    o.loadFile(R('overlay', 'index.html'));
     this.overlayShown = false;
-    this.overlay.webContents.once('did-finish-load', () => { this.positionOverlay(); this.syncOverlay(); });
-    this.overlay.on('hide', () => { setTimeout(() => { const o = this.overlay; if (this.overlayShown && o && !o.isDestroyed() && !o.isVisible()) o.showInactive(); }, 250); });
-    this.overlay.webContents.on('render-process-gone', (_e, d) => { console.log('[overlay] page gone:', d && d.reason); this._rebuildOverlay(); });
-    this.overlay.on('unresponsive', () => { console.log('[overlay] unresponsive, reloading'); try { this.overlay.webContents.reload(); } catch { this._rebuildOverlay(); } });
+    o.webContents.on('did-finish-load', () => {
+      if (this.overlay !== o || o.isDestroyed()) return;
+      this._overlayLoaded = true;
+      const resolve = this._resolveOverlayReady;
+      this._resolveOverlayReady = null;
+      if (resolve) resolve();
+      this.positionOverlay();
+      this.syncOverlay();
+      const queued = this._overlayQueue.splice(0);
+      for (const [ch, payload] of queued) {
+        if (this.overlay === o && !o.isDestroyed()) o.webContents.send(ch, payload);
+      }
+    });
+    o.on('hide', () => { setTimeout(() => { const cur = this.overlay; if (this.overlayShown && cur && !cur.isDestroyed() && !cur.isVisible()) cur.showInactive(); }, 250); });
+    o.webContents.on('render-process-gone', (_e, d) => {
+      console.log('[overlay] page gone:', d && d.reason);
+      this.onOverlayLost?.();
+      this._rebuildOverlay();
+    });
+    o.on('unresponsive', () => {
+      console.log('[overlay] unresponsive, reloading');
+      this.onOverlayLost?.();
+      try {
+        this._overlayLoaded = false;
+        this._overlayReady = new Promise((resolve) => { this._resolveOverlayReady = resolve; });
+        o.webContents.reload();
+      } catch {
+        this._rebuildOverlay();
+      }
+    });
     if (!this._watching) {
       this._watching = true;
       const refit = () => { if (!this.drag && !this._snapping) this.positionOverlay(); this._repaintOverlay(); };
@@ -99,13 +135,33 @@ class Windows {
     }
   }
 
+  async ensureOverlay() {
+    if (!this.overlay || this.overlay.isDestroyed()) {
+      this.createOverlay();
+    }
+    if (this._overlayReady && (!this._overlayLoaded || this.overlay?.webContents.isLoading())) {
+      await this._overlayReady;
+    }
+    return this.overlay;
+  }
+
   _rebuildOverlay() {
     if (this._rebuilding) return;
     this._rebuilding = true;
+    this.onOverlayLost?.();
     const old = this.overlay;
     this.overlay = null; this.overlayShown = false;
+    this._overlayLoaded = false;
+    this._overlayQueue = [];
+    const resolve = this._resolveOverlayReady;
+    this._resolveOverlayReady = null;
+    if (resolve) resolve();
     try { if (old && !old.isDestroyed()) old.destroy(); } catch { }
-    setTimeout(() => { this._rebuilding = false; this.createOverlay(); }, 600);
+    clearTimeout(this._rebuildTimer);
+    this._rebuildTimer = setTimeout(() => {
+      this._rebuilding = false;
+      if (!this.quitting && (!this.overlay || this.overlay.isDestroyed())) this.createOverlay();
+    }, 600);
   }
 
   _pillDisplay() {
@@ -230,7 +286,14 @@ class Windows {
   broadcast(channel, payload) {
     for (const w of [this.main, this.overlay]) if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
   }
-  toOverlay(channel, payload) { if (this.overlay && !this.overlay.isDestroyed()) this.overlay.webContents.send(channel, payload); }
+  toOverlay(channel, payload) {
+    if (!this.overlay || this.overlay.isDestroyed()) return;
+    if (!this._overlayLoaded || this.overlay.webContents.isLoading()) {
+      this._overlayQueue.push([channel, payload]);
+      return;
+    }
+    this.overlay.webContents.send(channel, payload);
+  }
   toMain(channel, payload) { if (this.main && !this.main.isDestroyed()) this.main.webContents.send(channel, payload); }
 }
 
