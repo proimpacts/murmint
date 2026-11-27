@@ -126,7 +126,7 @@ async function memoryUse() {
 
 function wireIpc() {
   for (const ch of ['state:get', 'config:set', 'provider:save', 'provider:remove', 'provider:key', 'provider:test', 'provider:presets', 'provider:models', 'provider:list', 'keys:capture', 'keys:down',
-    'history:clear', 'history:delete', 'clipboard:write', 'usage:summary', 'usage:reset', 'router:preview', 'format:try',
+    'history:clear', 'history:delete', 'history:query', 'clipboard:write', 'usage:summary', 'usage:reset', 'router:preview', 'format:try',
     'session:action', 'session:undo', 'local:status', 'local:download', 'local:cancel',
     'account:get', 'account:cancel', 'update:check', 'update:get', 'site:icon']) {
     ipcMain.handle(ch, (_e, ...a) => core.ui(ch, ...a));
