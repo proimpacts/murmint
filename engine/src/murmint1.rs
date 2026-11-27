@@ -126,6 +126,13 @@ struct Progress {
 static PROGRESS: Mutex<Progress> = Mutex::new(Progress { state: "none", received: 0, error: None, checking: false });
 static DOWNLOADING: AtomicBool = AtomicBool::new(false);
 static CANCEL: AtomicBool = AtomicBool::new(false);
+static CANCEL_NOTIFY: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
+static DL_GEN: AtomicU64 = AtomicU64::new(0);
+static DL_LOCK: Mutex<()> = Mutex::new(());
+
+fn dl_cancelled(gen: u64) -> bool {
+    CANCEL.load(Ordering::SeqCst) || DL_GEN.load(Ordering::SeqCst) != gen
+}
 
 fn status_of(p: &Progress) -> Value {
     let installed = installed();
@@ -155,54 +162,76 @@ fn gb(n: u64) -> String {
 
 /// Downloads Murmint 1 in the background. Once it is in place, a signed-in, set-up Murmint starts using it.
 pub fn download() -> Value {
-    if DOWNLOADING.swap(true, Ordering::SeqCst) {
-        return status();
-    }
-    if installed() {
-        DOWNLOADING.store(false, Ordering::SeqCst);
-        tokio::spawn(after_download());
-        return status();
-    }
-    let left: u64 = PARTS.iter().filter(|p| !done(p)).map(|p| p.size).sum();
-    if let Some(free) = free_space(&root()) {
-        if free < left + SPARE {
-            DOWNLOADING.store(false, Ordering::SeqCst);
-            let msg = format!("Not enough disk space. Murmint 1 needs {} free and this drive has {}.", gb(left + SPARE), gb(free));
-            report(|p| {
-                p.state = "error";
-                p.error = Some(msg);
-            });
+    let my_gen = {
+        let _guard = DL_LOCK.lock().unwrap();
+        if DOWNLOADING.swap(true, Ordering::SeqCst) {
             return status();
         }
-    }
-    CANCEL.store(false, Ordering::SeqCst);
+        if installed() {
+            DOWNLOADING.store(false, Ordering::SeqCst);
+            tokio::spawn(after_download());
+            return status();
+        }
+        let left: u64 = PARTS.iter().filter(|p| !done(p)).map(|p| p.size).sum();
+        if let Some(free) = free_space(&root()) {
+            if free < left + SPARE {
+                DOWNLOADING.store(false, Ordering::SeqCst);
+                let msg = format!("Not enough disk space. Murmint 1 needs {} free and this drive has {}.", gb(left + SPARE), gb(free));
+                report(|p| {
+                    p.state = "error";
+                    p.error = Some(msg);
+                });
+                return status();
+            }
+        }
+        CANCEL.store(false, Ordering::SeqCst);
+        DL_GEN.fetch_add(1, Ordering::SeqCst) + 1
+    };
     report(|p| {
         p.state = "downloading";
         p.error = None;
         p.received = 0;
+        p.checking = false;
     });
-    tokio::spawn(async {
+    tokio::spawn(async move {
         let result = async {
             let mut base = 0;
             for p in &PARTS {
+                if dl_cancelled(my_gen) {
+                    return Err("cancelled".into());
+                }
                 if !done(p) {
-                    install(p, base).await?;
+                    install(p, base, my_gen).await?;
                 }
                 base += p.size;
-                report(|g| g.received = base);
+                if !dl_cancelled(my_gen) {
+                    report(|g| g.received = base);
+                }
             }
             Ok::<(), String>(())
         }
         .await;
-        DOWNLOADING.store(false, Ordering::SeqCst);
+        let still_current = {
+            let _guard = DL_LOCK.lock().unwrap();
+            if DL_GEN.load(Ordering::SeqCst) == my_gen {
+                DOWNLOADING.store(false, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        };
+        if !still_current {
+            return;
+        }
         match result {
             Ok(()) => {
                 report(|p| p.state = "installed");
                 after_download().await;
             }
             Err(e) => {
-                let cancelled = CANCEL.load(Ordering::SeqCst);
+                let cancelled = dl_cancelled(my_gen);
                 report(|p| {
+                    p.checking = false;
                     p.state = if cancelled { "none" } else { "error" };
                     p.error = (!cancelled).then_some(e);
                 });
@@ -213,7 +242,20 @@ pub fn download() -> Value {
 }
 
 pub fn cancel() {
-    CANCEL.store(true, Ordering::SeqCst);
+    {
+        let _guard = DL_LOCK.lock().unwrap();
+        CANCEL.store(true, Ordering::SeqCst);
+        DL_GEN.fetch_add(1, Ordering::SeqCst);
+        DOWNLOADING.store(false, Ordering::SeqCst);
+        CANCEL_NOTIFY.notify_waiters();
+    }
+    report(|p| {
+        if p.state == "downloading" {
+            p.state = "none";
+            p.error = None;
+            p.checking = false;
+        }
+    });
 }
 
 async fn after_download() {
@@ -223,32 +265,76 @@ async fn after_download() {
     }
 }
 
-async fn install(p: &Part, base: u64) -> Result<(), String> {
+async fn install(p: &Part, base: u64, my_gen: u64) -> Result<(), String> {
     let dir = root();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let tmp = dir.join(if p.zip { format!("{}.zip.part", p.id) } else { format!("{MODEL_FILE}.part") });
-    fetch_to(p, &tmp, base).await?;
-    report(|g| g.checking = true);
+    let tmp = dir.join(if p.zip {
+        format!("{}.zip.{my_gen}.part", p.id)
+    } else {
+        format!("{MODEL_FILE}.{my_gen}.part")
+    });
+    if let Err(e) = fetch_to(p, &tmp, base, my_gen).await {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if dl_cancelled(my_gen) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("cancelled".into());
+    }
+    if DL_GEN.load(Ordering::SeqCst) == my_gen {
+        report(|g| g.checking = true);
+    }
     let path = tmp.clone();
     let sum = tokio::task::spawn_blocking(move || sha256_file(&path)).await.ok().flatten().unwrap_or_default();
-    report(|g| g.checking = false);
+    if DL_GEN.load(Ordering::SeqCst) == my_gen {
+        report(|g| g.checking = false);
+    }
     if sum != p.sha256 {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("{} did not download correctly. Try again.", p.label));
     }
+    if dl_cancelled(my_gen) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("cancelled".into());
+    }
     if p.zip {
         let (zip, dest) = (tmp.clone(), dir.join("whisper"));
         let label = p.label;
-        tokio::task::spawn_blocking(move || unzip(&zip, &dest)).await.ok().flatten().ok_or(format!("could not unpack {label}"))?;
+        if tokio::task::spawn_blocking(move || unzip(&zip, &dest)).await.ok().flatten().is_none() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("could not unpack {label}"));
+        }
         let _ = std::fs::remove_file(&tmp);
-    } else {
-        std::fs::rename(&tmp, dir.join(MODEL_FILE)).map_err(|e| e.to_string())?;
+    } else if let Err(e) = std::fs::rename(&tmp, dir.join(MODEL_FILE)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    if dl_cancelled(my_gen) {
+        return Err("cancelled".into());
     }
     std::fs::write(dir.join(format!("{}.ok", p.id)), p.sha256).map_err(|e| e.to_string())
 }
 
+async fn await_step<T, E: ToString>(
+    my_gen: u64,
+    fut: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    let notified = CANCEL_NOTIFY.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if dl_cancelled(my_gen) {
+        return Err("cancelled".into());
+    }
+    tokio::select! {
+        biased;
+        _ = &mut notified => Err("cancelled".into()),
+        _ = tokio::time::sleep(Duration::from_secs(30)) => Err("download timed out".into()),
+        res = fut => res.map_err(|e| e.to_string()),
+    }
+}
+
 // Downloads one file, picking up where an earlier try stopped
-async fn fetch_to(p: &Part, file: &Path, base: u64) -> Result<(), String> {
+async fn fetch_to(p: &Part, file: &Path, base: u64, my_gen: u64) -> Result<(), String> {
     let have = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
     if have >= p.size {
         return Ok(());
@@ -257,7 +343,7 @@ async fn fetch_to(p: &Part, file: &Path, base: u64) -> Result<(), String> {
     if have > 0 {
         req = req.header("Range", format!("bytes={have}-"));
     }
-    let mut r = req.send().await.map_err(|e| e.to_string())?;
+    let mut r = await_step(my_gen, req.send()).await?;
     if !r.status().is_success() {
         return Err(format!("the download server answered {}", r.status().as_u16()));
     }
@@ -270,8 +356,8 @@ async fn fetch_to(p: &Part, file: &Path, base: u64) -> Result<(), String> {
         .open(file)
         .map_err(|e| e.to_string())?;
     let (mut got, mut shown) = (if append { have } else { 0 }, Instant::now());
-    while let Some(chunk) = r.chunk().await.map_err(|e| e.to_string())? {
-        if CANCEL.load(Ordering::SeqCst) {
+    while let Some(chunk) = await_step(my_gen, r.chunk()).await? {
+        if dl_cancelled(my_gen) {
             return Err("cancelled".into());
         }
         got += chunk.len() as u64;
@@ -281,7 +367,9 @@ async fn fetch_to(p: &Part, file: &Path, base: u64) -> Result<(), String> {
         out.write_all(&chunk).map_err(|e| e.to_string())?;
         if shown.elapsed() > Duration::from_millis(250) {
             shown = Instant::now();
-            report(|g| g.received = base + got);
+            if DL_GEN.load(Ordering::SeqCst) == my_gen {
+                report(|g| g.received = base + got);
+            }
         }
     }
     Ok(())
