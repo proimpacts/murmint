@@ -253,10 +253,39 @@ pub async fn autotype() -> bool {
 static CLIPBOARD: std::sync::LazyLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
 
+#[derive(Debug, PartialEq, Eq)]
+enum RestoreAction {
+    Keep,
+    Clear,
+    Restore,
+}
+
+fn restore_action(snap: Option<&Option<clip::Snapshot>>) -> RestoreAction {
+    match snap {
+        Some(Some(s)) if s.is_empty() => RestoreAction::Clear,
+        Some(Some(_)) => RestoreAction::Restore,
+        _ => RestoreAction::Keep,
+    }
+}
+
+fn restore_snap_sync(snap: &clip::Snapshot) {
+    if snap.is_empty() {
+        clip::clear();
+    } else {
+        clip::restore(snap);
+    }
+}
+
+async fn restore_snap_async(snap: Option<Option<clip::Snapshot>>) {
+    if let Some(Some(s)) = snap {
+        tokio::task::spawn_blocking(move || restore_snap_sync(&s)).await.ok();
+    }
+}
+
 /// Selected text in the foreground app (via Ctrl+C); restores the clipboard.
 pub async fn copy_selection() -> Option<String> {
     let hold = CLIPBOARD.clone().lock_owned().await;
-    let snap = tokio::task::spawn_blocking(clip::snapshot).await.unwrap_or_default();
+    let snap = tokio::task::spawn_blocking(clip::snapshot).await.ok().flatten();
     tokio::task::spawn_blocking(clip::clear).await.ok();
     crate::native::handle("native_copy", &json!({ "id": 0 })).await;
     let mut text = None;
@@ -327,79 +356,146 @@ pub async fn insert(text: &str) -> Inserted {
     }
     let restore = cfg["restoreClipboard"].as_bool().unwrap_or(true);
     let hold = CLIPBOARD.clone().lock_owned().await;
-    let snap = if restore {
-        Some(tokio::task::spawn_blocking(clip::snapshot).await.unwrap_or_default())
+    let snap: Option<Option<clip::Snapshot>> = if restore {
+        Some(tokio::task::spawn_blocking(clip::snapshot).await.ok().flatten())
     } else {
         None
     };
     let keep = cfg["method"] == "clipboard";
-    {
-        let t = if !keep && is_discord().await {
-            split_for_paste(&text, DISCORD_PASTE_LIMIT).into_iter().next().unwrap_or_default()
-        } else {
-            text.clone()
+    let discord = if keep { false } else { is_discord().await };
+    // Discord turns long pastes into a .txt upload
+    let pieces = if discord { split_for_paste(&text, DISCORD_PASTE_LIMIT) } else { vec![] };
+    if !target_matches(expected).await {
+        drop(hold);
+        return Inserted {
+            ok: false,
+            method: "unplaced",
+            error: Some("Focus moved to another field".into()),
         };
-        tokio::task::spawn_blocking(
+    }
+    {
+        let t = if pieces.len() > 1 { pieces[0].clone() } else { text.clone() };
+        let staged = tokio::task::spawn_blocking(
             move || if keep { clip::write_text(&t) } else { clip::write_text_private(&t) },
         )
         .await
-        .ok();
+        .unwrap_or(false);
+        if !staged {
+            restore_snap_async(snap).await;
+            drop(hold);
+            return Inserted {
+                ok: false,
+                method: "unplaced",
+                error: Some("Couldn't write to the clipboard".into()),
+            };
+        }
     }
 
     if cfg["method"] == "clipboard" {
-        *LAST.lock().unwrap() = Some((text, "clipboard"));
+        *LAST.lock().unwrap() = Some((text, "clipboard", expected.cloned()));
         return Inserted { ok: true, method: "clipboard", error: None };
     }
     tokio::time::sleep(Duration::from_millis(25)).await;
-    // Discord turns long pastes into a .txt upload
-    let pieces = if is_discord().await { split_for_paste(&text, DISCORD_PASTE_LIMIT) } else { vec![] };
     if pieces.len() > 1 {
         for (i, piece) in pieces.iter().enumerate() {
+            if !target_matches(expected).await {
+                restore_snap_async(snap).await;
+                drop(hold);
+                return Inserted {
+                    ok: false,
+                    method: "unplaced",
+                    error: Some("Focus moved to another field".into()),
+                };
+            }
             if i > 0 {
                 let p = piece.clone();
-                tokio::task::spawn_blocking(move || clip::write_text_private(&p)).await.ok();
+                let staged = tokio::task::spawn_blocking(move || clip::write_text_private(&p))
+                    .await
+                    .unwrap_or(false);
+                if !staged {
+                    restore_snap_async(snap).await;
+                    drop(hold);
+                    return Inserted {
+                        ok: false,
+                        method: "unplaced",
+                        error: Some("Couldn't write to the clipboard".into()),
+                    };
+                }
                 tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            crate::native::handle("native_paste", &json!({ "id": 0 })).await;
-            tokio::time::sleep(Duration::from_millis(140)).await;
-        }
-    }
-    let res = if pieces.len() > 1 {
-        Some(json!({ "ok": true }))
-    } else {
-        crate::native::handle("native_paste", &json!({ "id": 0 })).await
-    };
-    if res.as_ref().map_or(true, |r| r["ok"] != json!(true)) {
-        *LAST.lock().unwrap() = Some((text, "clipboard"));
-        return Inserted { ok: false, method: "clipboard", error: Some("Couldn't send Ctrl+V".into()) };
-    }
-    *LAST.lock().unwrap() = Some((text.clone(), "paste"));
-    tokio::spawn(async move {
-        // Slow apps (Discord, VS Code, browsers under load) read the clipboard a moment after Ctrl+V. Putting the old
-        // clipboard back too soon made them paste that instead, so wait long enough for them to have read ours.
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let last_piece = split_for_paste(&text, DISCORD_PASTE_LIMIT).pop().unwrap_or_default();
-        tokio::task::spawn_blocking(move || {
-            let now = clip::read_text().map(|t| t.replace("\r\n", "\n"));
-            let ours = [text, last_piece].map(|t| t.replace("\r\n", "\n"));
-            if now.is_some_and(|t| ours.contains(&t)) {
-                match snap {
-                    Some(s) if !s.is_empty() => clip::restore(&s),
-                    _ => clip::clear(),
+                if !target_matches(expected).await {
+                    restore_snap_async(snap).await;
+                    drop(hold);
+                    return Inserted {
+                        ok: false,
+                        method: "unplaced",
+                        error: Some("Focus moved to another field".into()),
+                    };
                 }
             }
-        })
-        .await
-        .ok();
+            let r = crate::native::handle("native_paste", &json!({ "id": 0 })).await;
+            if r.as_ref().map_or(true, |r| r["ok"] != json!(true)) {
+                if i == 0 {
+                    *LAST.lock().unwrap() = Some((text, "clipboard", expected.cloned()));
+                }
+                return Inserted {
+                    ok: false,
+                    method: "clipboard",
+                    error: Some("Couldn't send Ctrl+V".into()),
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(140)).await;
+        }
+    } else {
+        if !target_matches(expected).await {
+            restore_snap_async(snap).await;
+            drop(hold);
+            return Inserted {
+                ok: false,
+                method: "unplaced",
+                error: Some("Focus moved to another field".into()),
+            };
+        }
+        let res = crate::native::handle("native_paste", &json!({ "id": 0 })).await;
+        if res.as_ref().map_or(true, |r| r["ok"] != json!(true)) {
+            *LAST.lock().unwrap() = Some((text, "clipboard", expected.cloned()));
+            return Inserted { ok: false, method: "clipboard", error: Some("Couldn't send Ctrl+V".into()) };
+        }
+    }
+    *LAST.lock().unwrap() = Some((text.clone(), "paste", expected.cloned()));
+    if restore_action(snap.as_ref()) != RestoreAction::Keep {
+        tokio::spawn(async move {
+            // Slow apps (Discord, VS Code, browsers under load) read the clipboard a moment after Ctrl+V. Putting the old
+            // clipboard back too soon made them paste that instead, so wait long enough for them to have read ours.
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let last_piece = split_for_paste(&text, DISCORD_PASTE_LIMIT).pop().unwrap_or_default();
+            tokio::task::spawn_blocking(move || {
+                let now = clip::read_text().map(|t| t.replace("\r\n", "\n"));
+                let ours = [text, last_piece].map(|t| t.replace("\r\n", "\n"));
+                if now.is_some_and(|t| ours.contains(&t)) {
+                    if let Some(Some(s)) = snap {
+                        restore_snap_sync(&s);
+                    }
+                }
+            })
+            .await
+            .ok();
+            drop(hold);
+        });
+    } else {
         drop(hold);
-    });
+    }
     Inserted { ok: true, method: "paste", error: None }
 }
 
 pub async fn undo() -> Value {
     let last = LAST.lock().unwrap().clone();
     match last {
-        Some((_, "paste")) => {
+        Some((_, "paste", target)) => {
+            if let Some(t) = target.as_ref() {
+                if !target_matches(Some(t)).await {
+                    return json!({ "ok": false, "error": "Focus moved since the last dictation" });
+                }
+            }
             let r = crate::native::handle("native_undo", &json!({ "id": 0 })).await;
             if r.is_some_and(|r| r["ok"] == json!(true)) {
                 *LAST.lock().unwrap() = None;
@@ -424,5 +520,41 @@ mod paste_split_tests {
         assert!(pieces.iter().all(|p| p.chars().count() <= 1800));
         assert_eq!(pieces.concat(), text);
         assert_eq!(split_for_paste("short", 1800), vec!["short".to_string()]);
+    }
+
+    #[test]
+    fn restore_action_preserves_clipboard_when_restore_off_or_snapshot_failed() {
+        assert_eq!(restore_action(None), RestoreAction::Keep);
+        assert_eq!(restore_action(Some(&None)), RestoreAction::Keep);
+        assert_eq!(restore_action(Some(&Some(vec![]))), RestoreAction::Clear);
+        assert_eq!(restore_action(Some(&Some(vec![(15, vec![1, 2])]))), RestoreAction::Restore);
+    }
+
+    #[tokio::test]
+    async fn target_mismatch_aborts_erase_insert_and_undo_without_mutating() {
+        let _lock = TEST_GUARD.lock().unwrap();
+        let _cleanup = TestCleanup;
+        *TEST_SINK.lock().unwrap() = Some(vec![]);
+        let target = crate::native::TargetIdentity {
+            fg_hwnd: 123,
+            focus_hwnd: 456,
+            control_type: 50004,
+            automation_id: "box".into(),
+            class_name: "Edit".into(),
+        };
+
+        TEST_TARGET_MOVED.store(true, Ordering::SeqCst);
+        assert!(!erase_in(3, Some(&target)).await);
+        let ins = insert_into("secret text", Some(&target)).await;
+        assert!(!ins.ok);
+        assert_eq!(ins.method, "unplaced");
+        assert_eq!(ins.error.as_deref(), Some("Focus moved to another field"));
+        assert!(TEST_SINK.lock().unwrap().as_ref().unwrap().is_empty());
+
+        *LAST.lock().unwrap() = Some(("pasted".into(), "paste", Some(target)));
+        let u = undo().await;
+        assert_eq!(u["ok"], json!(false));
+        assert_eq!(u["error"], json!("Focus moved since the last dictation"));
+        assert!(LAST.lock().unwrap().is_some());
     }
 }
