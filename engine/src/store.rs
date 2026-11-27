@@ -456,6 +456,7 @@ impl Store {
         self.history.insert(0, entry);
         self.history.truncate(2000);
         self.touch("history.json");
+        self.prune_history();
     }
     pub fn update_history(&mut self, id: &str, patch: &Value) {
         if let Some(e) = self.history.iter_mut().find(|h| h["id"] == id) {
@@ -487,17 +488,24 @@ impl Store {
         if renamed {
             self.touch("history.json");
         }
+        let before_len = self.history.len();
         let privacy = &self.config["privacy"];
         let days = privacy["retentionDays"].as_i64().unwrap_or(0);
         if privacy["saveHistory"] == json!(false) {
             self.history.clear();
+            if self.history.len() != before_len {
+                self.touch("history.json");
+            }
             return;
         }
-        if days == 0 {
+        if days <= 0 {
             return;
         }
         let cutoff = now_ms() - days * 86_400_000;
         self.history.retain(|h| h["ts"].as_i64().unwrap_or(i64::MAX) >= cutoff);
+        if self.history.len() != before_len {
+            self.touch("history.json");
+        }
     }
 
     pub fn record_usage(&mut self, day: &str, patch: &Value) {

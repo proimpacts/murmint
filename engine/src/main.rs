@@ -707,13 +707,25 @@ async fn main() {
                         *core::get().helper_ready.lock().unwrap() = true;
                         tokio::spawn(async {
                             let mut t = tokio::time::interval(Duration::from_millis(300));
+                            let mut ticks: u32 = 0;
                             loop {
                                 t.tick().await;
+                                ticks = ticks.wrapping_add(1);
+                                let check_prune = ticks % 200 == 0;
+                                let mut pruned = false;
                                 if let Some(c) = core::try_get() {
                                     let mut s = c.store.lock().unwrap();
+                                    if check_prune {
+                                        let before = s.history.len();
+                                        s.prune_history();
+                                        pruned = before != s.history.len();
+                                    }
                                     if s.has_unsaved() {
                                         s.flush();
                                     }
+                                }
+                                if pruned {
+                                    core::changed("history");
                                 }
                             }
                         });
