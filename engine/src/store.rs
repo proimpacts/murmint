@@ -99,15 +99,46 @@ pub fn deep_merge(base: &Value, over: &Value) -> Value {
 
 pub fn set_path(root: &mut Value, dotted: &str, value: Value) {
     let parts: Vec<&str> = dotted.split('.').collect();
+    if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+        return;
+    }
     let mut cur = root;
     for p in &parts[..parts.len() - 1] {
-        if !cur.get(*p).is_some_and(is_obj) {
-            cur[*p] = json!({});
+        match cur {
+            Value::Array(arr) => {
+                let Ok(idx) = p.parse::<usize>() else { return };
+                if idx >= arr.len() {
+                    return;
+                }
+                cur = &mut arr[idx];
+            }
+            Value::Object(map) => {
+                if !map.get(*p).is_some_and(|v| v.is_object() || v.is_array()) {
+                    map.insert((*p).to_string(), json!({}));
+                }
+                cur = map.get_mut(*p).unwrap();
+            }
+            _ => return,
         }
-        cur = cur.get_mut(*p).unwrap();
     }
-    cur[parts[parts.len() - 1]] = value;
+    let leaf = parts[parts.len() - 1];
+    match cur {
+        Value::Array(arr) => {
+            if let Ok(idx) = leaf.parse::<usize>() {
+                if idx < arr.len() {
+                    arr[idx] = value;
+                }
+            }
+        }
+        Value::Object(map) => {
+            map.insert(leaf.to_string(), value);
+        }
+        _ => {}
+    }
 }
+
+#[cfg(test)]
+pub static FORCE_DPAPI_FAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(windows)]
 mod dpapi {
@@ -773,6 +804,155 @@ mod tests {
             .collect();
         assert_eq!(terms, ["Kubernetes", "Zed"]);
         assert!(s.config["personal"]["termCounts"].is_null());
+        assert_eq!(s.config["vocabAutoCleaned"], json!(true));
+
+        let mut vocab = s.config["personal"]["vocabulary"].as_array().unwrap().clone();
+        vocab.push(json!({ "id": "5", "term": "Murmint", "sounds": [], "note": "suggested" }));
+        vocab.push(json!({ "id": "6", "term": "LegacyTag", "sounds": [], "note": "auto" }));
+        s.set("personal.vocabulary", Value::Array(vocab));
+        s.flush();
+        let s2 = Store::open(&d);
+        let terms2: Vec<&str> = s2.config["personal"]["vocabulary"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["term"].as_str().unwrap())
+            .collect();
+        assert_eq!(terms2, ["Kubernetes", "Zed", "Murmint", "LegacyTag"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn prune_history_persists_deletions_to_disk() {
+        let d = tmp();
+        let now = now_ms();
+        std::fs::write(
+            d.join("history.json"),
+            json!([
+                { "id": "recent", "ts": now - 2 * 86_400_000, "text": "keep" },
+                { "id": "aged", "ts": now - 10 * 86_400_000, "text": "drop" }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut s = Store::open(&d);
+        assert!(!s.has_unsaved());
+        s.set("privacy.retentionDays", json!(5));
+        s.prune_history();
+        assert_eq!(s.history.len(), 1);
+        s.flush();
+        let on_disk: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(d.join("history.json")).unwrap()).unwrap();
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0]["id"], "recent");
+
+        let mut s2 = Store::open(&d);
+        s2.set("privacy.saveHistory", json!(false));
+        s2.prune_history();
+        assert!(s2.history.is_empty());
+        s2.flush();
+        let on_disk2: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(d.join("history.json")).unwrap()).unwrap();
+        assert!(on_disk2.is_empty());
+
+        let mut s3 = Store::open(&d);
+        s3.set("privacy.saveHistory", json!(true));
+        s3.flush();
+        assert!(Store::open(&d).history.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn degraded_store_preserves_corrupt_or_unreadable_files_across_flush() {
+        let d = tmp();
+        let bad_hist = "{not valid json";
+        std::fs::write(d.join("history.json"), bad_hist).unwrap();
+        let mut s = Store::open(&d);
+        assert!(s.is_degraded("history.json"));
+        assert!(!s.is_degraded("config.json"));
+        assert_eq!(std::fs::read_to_string(d.join("history.json.bak")).unwrap(), bad_hist);
+
+        s.add_history(json!({ "id": "new1", "ts": now_ms(), "text": "hello" }));
+        s.flush();
+        assert_eq!(std::fs::read_to_string(d.join("history.json")).unwrap(), bad_hist);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let d2 = tmp();
+            let valid_hist = json!([{ "id": "orig", "ts": now_ms(), "text": "keep me" }]).to_string();
+            std::fs::write(d2.join("history.json"), &valid_hist).unwrap();
+            let lock_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(d2.join("history.json"))
+                .unwrap();
+            let mut s2 = Store::open(&d2);
+            drop(lock_file);
+            assert!(s2.is_degraded("history.json"));
+            s2.add_history(json!({ "id": "new2", "ts": now_ms(), "text": "must not overwrite" }));
+            s2.flush();
+            assert_eq!(std::fs::read_to_string(d2.join("history.json")).unwrap(), valid_hist);
+            let _ = std::fs::remove_dir_all(&d2);
+        }
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn set_path_handles_arrays_safely() {
+        let mut v = json!({
+            "appProfiles": [
+                { "id": "slack", "style": "custom-1" },
+                { "id": "discord", "style": "casual" }
+            ]
+        });
+        set_path(&mut v, "appProfiles.0.style", json!(""));
+        assert!(v["appProfiles"].is_array());
+        assert_eq!(v["appProfiles"][0]["style"], "");
+        assert_eq!(v["appProfiles"][1]["id"], "discord");
+
+        set_path(&mut v, "appProfiles.99.style", json!("x"));
+        set_path(&mut v, "appProfiles.bad.style", json!("x"));
+        assert!(v["appProfiles"].is_array());
+        assert_eq!(v["appProfiles"].as_array().unwrap().len(), 2);
+
+        set_path(&mut v, "appProfiles.1", json!({ "id": "discord", "style": "natural" }));
+        assert_eq!(v["appProfiles"][1]["style"], "natural");
+    }
+
+    #[test]
+    fn dpapi_failure_returns_error_without_plaintext_fallback() {
+        let d = tmp();
+        let mut s = Store::open(&d);
+        FORCE_DPAPI_FAIL.store(true, std::sync::atomic::Ordering::SeqCst);
+        let res = s.try_set_secret("openai", "sk-never-plaintext");
+        FORCE_DPAPI_FAIL.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(res.is_err());
+        assert!(!s.has_secret("openai"));
+        s.flush();
+        assert!(!d.join("secrets.json").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn removed_shipped_models_are_not_readded_on_reopen() {
+        let d = tmp();
+        let mut s = Store::open(&d);
+        let mut providers = s.config["providers"].as_array().unwrap().clone();
+        let openai = providers.iter_mut().find(|p| p["id"] == "openai").unwrap();
+        let models = openai["models"].as_array().unwrap().clone();
+        let removed_id = models[0]["id"].clone();
+        let kept: Vec<Value> = models.into_iter().skip(1).collect();
+        openai["models"] = Value::Array(kept);
+        openai["removedModels"] = json!([removed_id]);
+        s.replace_section("providers", Value::Array(providers));
+        s.flush();
+
+        let s2 = Store::open(&d);
+        let openai2 = s2.provider("openai").unwrap();
+        assert!(!openai2["models"].as_array().unwrap().iter().any(|m| m["id"] == removed_id));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
