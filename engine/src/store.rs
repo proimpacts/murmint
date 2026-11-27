@@ -669,8 +669,11 @@ fn reconcile_providers(ship: &Value, saved: &Value) -> Value {
                 m
             })
             .collect();
+        let removed = s["removedModels"].as_array();
         for m in &p_models {
-            if !models.iter().any(|x| x["id"] == m["id"]) {
+            if !models.iter().any(|x| x["id"] == m["id"])
+                && !removed.is_some_and(|r| r.contains(&m["id"]))
+            {
                 models.push(m.clone());
             }
         }

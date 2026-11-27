@@ -117,7 +117,14 @@
 
     async function save(test) {
       const k = key.value.trim();
-      const models = picked().map((id) => { const m = known.get(id) || {}; return { tier: 'decent', ...m, id, label: m.label || id, task: m.task || guessTask(id) }; });
+      const seenIds = new Set();
+      const models = [];
+      for (const id of picked()) {
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        const m = known.get(id) || {};
+        models.push({ tier: 'decent', ...m, id, label: m.label || id, task: m.task || guessTask(id) });
+      }
       if (!models.length) return say('Choose at least one model.', 'bad');
       if (!k && !st.hasKey && !preset.keyOptional) return say('Paste your key first.', 'bad');
       if (preset.key === 'cloudflare' && !/^[0-9a-f]{32}$/i.test(acct.value.trim())) return say('The Account ID is 32 letters and numbers.', 'bad');
@@ -423,7 +430,22 @@
   // What Automatic would pick and Murmint 1's state are fetched before the page is drawn, so a change shows the
   // loader once and then the finished page, instead of a page that fills in and flashes.
   let preview = null, shownFor = '', loading = false, justLoaded = false, tab = 'stt';
-  const keyOf = () => JSON.stringify([App.cfg().models, App.cfg().providers.map((p) => [p.id, p.enabled, App.S.providerStatus[p.id]?.ready])]);
+  const keyOf = () => {
+    const cfg = App.cfg();
+    return JSON.stringify([
+      cfg.models,
+      (cfg.providers || []).map((p) => [
+        p.id,
+        p.enabled,
+        App.S.providerStatus[p.id]?.ready,
+        (p.models || []).map((m) => m.id),
+        p.removedModels || [],
+      ]),
+      cfg.dictation?.realtime,
+      cfg.dictation?.language,
+      cfg.privacy?.localOnly,
+    ]);
+  };
   async function load(key) {
     loading = true;
     try {
