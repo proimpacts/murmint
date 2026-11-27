@@ -90,11 +90,19 @@ pub fn start(emit: impl Fn(&str, Value) + Send + Sync + 'static) {
                         continue;
                     }
                     last = seq;
+                    if now_ms() < SUPPRESS_UNTIL.load(Ordering::SeqCst) {
+                        OWN.store(seq, Ordering::Relaxed);
+                        continue;
+                    }
                     if !ON.load(Ordering::Relaxed) || seq == OWN.load(Ordering::Relaxed) {
                         continue;
                     }
                     // let the app that copied finish writing every format
                     std::thread::sleep(std::time::Duration::from_millis(80));
+                    if now_ms() < SUPPRESS_UNTIL.load(Ordering::SeqCst) {
+                        OWN.store(win::sequence(), Ordering::Relaxed);
+                        continue;
+                    }
                     if let Some(copy) = win::read_copy() {
                         on_copy("clipboard:copied", copy);
                     }
@@ -279,35 +287,53 @@ mod win {
 
     // CF_HDROP: a DROPFILES header (20 bytes: offset to the paths, a point, two flags) then wide paths, double-zeroed
     pub fn write_files(paths: &[String]) -> bool {
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
-        use windows::Win32::System::Memory::{GlobalAlloc, GMEM_MOVEABLE};
+        let valid: Vec<&str> = paths.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+        if valid.is_empty() {
+            return false;
+        }
         let mut data: Vec<u8> = vec![];
         data.extend(20u32.to_le_bytes());
         data.extend([0u8; 12]);
         data.extend(1u32.to_le_bytes());
-        for p in paths {
+        for p in valid {
             for w in p.encode_utf16().chain(Some(0)) {
                 data.extend(w.to_le_bytes());
             }
         }
         data.extend([0u8, 0]);
-        if !open() {
-            return false;
-        }
         unsafe {
-            let _ = EmptyClipboard();
-            if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, data.len()) {
-                let p = GlobalLock(h);
-                if !p.is_null() {
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, data.len());
-                    let _ = GlobalUnlock(h);
-                    let _ = SetClipboardData(15, HANDLE(h.0));
+            let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, data.len()) else {
+                return false;
+            };
+            let p = GlobalLock(h);
+            if p.is_null() {
+                let _ = GlobalFree(h);
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, data.len());
+            let _ = GlobalUnlock(h);
+
+            if !open() {
+                let _ = GlobalFree(h);
+                return false;
+            }
+            let ok = if EmptyClipboard().is_ok() {
+                if SetClipboardData(15, HANDLE(h.0)).is_ok() {
+                    true
+                } else {
+                    let _ = GlobalFree(h);
+                    false
                 }
+            } else {
+                let _ = GlobalFree(h);
+                false
+            };
+            if ok {
+                super::suppress_capture(350);
             }
             let _ = CloseClipboard();
+            ok
         }
-        true
     }
 
     pub fn refocus(hwnd: i64) {
