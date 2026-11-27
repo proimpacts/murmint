@@ -67,6 +67,9 @@ fn main() {
     };
 
     let mut dir = args.iter().find_map(|a| a.strip_prefix("--dir=")).map(String::from).filter(|_| update).unwrap_or_else(default_dir);
+    if !update {
+        dir = ensure_safe_dir(&dir);
+    }
     let mut installing = false;
     let mut installed = false;
     event_loop.run(move |event, _, flow| {
@@ -115,7 +118,7 @@ fn main() {
                     "close" if !installing => *flow = ControlFlow::Exit,
                     "browse" => {
                         if let Some(picked) = win::pick_folder(window.hwnd()) {
-                            dir = if Path::new(&picked)
+                            let candidate = if Path::new(&picked)
                                 .file_name()
                                 .map_or(false, |n| n.eq_ignore_ascii_case("Murmint"))
                             {
@@ -123,6 +126,7 @@ fn main() {
                             } else {
                                 format!("{}\\Murmint", picked.trim_end_matches('\\'))
                             };
+                            dir = ensure_safe_dir(&candidate);
                             let _ =
                                 webview.evaluate_script(&format!("setup.dir({})", js_str(&dir)));
                         }
@@ -130,7 +134,12 @@ fn main() {
                     "install" if !installing && !installed => {
                         installing = true;
                         if let Some(d) = v["dir"].as_str().filter(|d| !d.trim().is_empty()) {
-                            dir = d.to_string();
+                            dir = d.trim().to_string();
+                        }
+                        if !update {
+                            dir = ensure_safe_dir(&dir);
+                            let _ =
+                                webview.evaluate_script(&format!("setup.dir({})", js_str(&dir)));
                         }
                         let (target, desktop, p) = (
                             dir.clone(),
@@ -208,6 +217,113 @@ fn uninstall_key() -> Option<String> {
     None
 }
 
+fn has_murmint_marker(dir: &Path) -> bool {
+    ["Murmint.exe", "Uninstall Murmint.exe", "Murmint Uninstaller.exe", ".murmint-install.json"]
+        .iter()
+        .any(|m| dir.join(m).exists())
+}
+
+fn is_non_empty_dir(dir: &Path) -> bool {
+    dir.is_dir() && std::fs::read_dir(dir).is_ok_and(|mut rd| rd.next().is_some())
+}
+
+fn ensure_safe_dir(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches(['\\', '/']);
+    let p = Path::new(trimmed);
+    if is_non_empty_dir(p) && !has_murmint_marker(p) {
+        format!("{trimmed}\\Murmint")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_known_murmint_entry(name: &str, is_dir: bool) -> bool {
+    let exact = [
+        "Murmint.exe",
+        "Uninstall Murmint.exe",
+        "Murmint Uninstaller.exe",
+        "murmint-uninstall.exe",
+        ".murmint-install.json",
+    ];
+    if exact.iter().any(|k| name.eq_ignore_ascii_case(k)) {
+        return true;
+    }
+    if is_dir {
+        return ["resources", "locales", "bin", "swiftshader"]
+            .iter()
+            .any(|k| name.eq_ignore_ascii_case(k));
+    }
+    if name.to_ascii_uppercase().starts_with("LICENSE") {
+        return true;
+    }
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            ["pak", "dll", "bin", "dat"]
+                .iter()
+                .any(|k| ext.eq_ignore_ascii_case(k))
+        })
+}
+
+fn read_manifest_set(dir: &Path) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let Ok(raw) = std::fs::read_to_string(dir.join(".murmint-install.json")) else {
+        return set;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return set;
+    };
+    if let Some(arr) = v.get("entries").and_then(|e| e.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                set.insert(s.to_ascii_lowercase());
+            }
+        }
+    }
+    set
+}
+
+fn snapshot_preexisting_other(dir: &Path) -> std::collections::HashSet<String> {
+    let mut other = std::collections::HashSet::new();
+    let prior = read_manifest_set(dir);
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return other;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
+        let lower = name.to_ascii_lowercase();
+        if !prior.contains(&lower) && !is_known_murmint_entry(&name, is_dir) {
+            other.insert(lower);
+        }
+    }
+    other
+}
+
+fn write_install_manifest(dir: &Path, preexisting_other: &std::collections::HashSet<String>) {
+    let mut entries = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == ".murmint-install.json" {
+                continue;
+            }
+            if !preexisting_other.contains(&name.to_ascii_lowercase()) {
+                entries.push(name);
+            }
+        }
+    }
+    entries.push(".murmint-install.json".to_string());
+    entries.sort();
+    entries.dedup();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "entries": entries,
+    });
+    let _ = std::fs::write(dir.join(".murmint-install.json"), manifest.to_string());
+}
+
 static OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn ok_flag() -> bool {
     OK.load(std::sync::atomic::Ordering::SeqCst)
@@ -247,6 +363,7 @@ fn install(
     }
     std::thread::sleep(Duration::from_millis(500));
     let setup = payload_path().map_err(|e| format!("Could not unpack the installer: {e}"))?;
+    let preexisting_other = snapshot_preexisting_other(Path::new(dir));
     say(6.0, "Copying files");
     let mut child = Command::new(&setup)
         .raw_arg("/S")
@@ -284,6 +401,7 @@ fn install(
     }
     say(97.0, "Finishing");
     register_uninstaller(dir);
+    write_install_manifest(Path::new(dir), &preexisting_other);
     if !desktop {
         if let Some(d) = win::desktop_dir() {
             let _ = std::fs::remove_file(Path::new(&d).join("Murmint.lnk"));
@@ -329,5 +447,50 @@ mod win {
 
     pub fn desktop_dir() -> Option<String> {
         unsafe { take(SHGetKnownFolderPath(&FOLDERID_Desktop, KNOWN_FOLDER_FLAG(0), None).ok()?) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("murmint-setup-test-{tag}-{nanos}"));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn ensure_safe_dir_appends_murmint_only_for_non_empty_unmarked_dirs() {
+        let dir = temp_dir("nonempty");
+        std::fs::write(dir.join("unrelated.txt"), b"x").unwrap();
+        assert_eq!(ensure_safe_dir(&dir.to_string_lossy()), format!("{}\\Murmint", dir.display()));
+
+        std::fs::write(dir.join("Murmint.exe"), b"exe").unwrap();
+        assert_eq!(ensure_safe_dir(&dir.to_string_lossy()), dir.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_install_manifest_excludes_preexisting_user_files() {
+        let dir = temp_dir("manifest");
+        std::fs::write(dir.join("user.txt"), b"keep").unwrap();
+        let pre = snapshot_preexisting_other(&dir);
+        std::fs::write(dir.join("Murmint.exe"), b"exe").unwrap();
+        std::fs::create_dir_all(dir.join("resources")).unwrap();
+        write_install_manifest(&dir, &pre);
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".murmint-install.json")).unwrap()).unwrap();
+        let entries: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+        assert!(entries.contains(&"Murmint.exe"));
+        assert!(entries.contains(&"resources"));
+        assert!(entries.contains(&".murmint-install.json"));
+        assert!(!entries.contains(&"user.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
