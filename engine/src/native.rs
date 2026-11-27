@@ -88,7 +88,8 @@ mod win {
     #[cfg(all(test, local_tests))]
     use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, SendMessageW,
+        GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW, GetWindowThreadProcessId, SendMessageW,
+        GUITHREADINFO,
     };
 
     const WIN: i32 = 91;
@@ -103,17 +104,78 @@ mod win {
         }
     }
 
+    fn is_extended_vk(vk: u16) -> bool {
+        matches!(vk, 0xA3 | 0xA5 | 0x5B | 0x5C)
+    }
+
+    fn key_input(vk: u16, up: bool) -> INPUT {
+        let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 };
+        let mut flags = KEYBD_EVENT_FLAGS(0);
+        if up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        if is_extended_vk(vk) {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
     fn key(vk: u16, up: bool) {
+        let input = [key_input(vk, up)];
         unsafe {
-            keybd_event(vk as u8, 0, if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, 0);
+            SendInput(&input, std::mem::size_of::<INPUT>() as i32);
         }
     }
 
     fn tap(k: u16) {
-        key(0x11, false);
-        key(k, false);
-        key(k, true);
-        key(0x11, true);
+        let inputs = [
+            key_input(0x11, false),
+            key_input(k, false),
+            key_input(k, true),
+            key_input(0x11, true),
+        ];
+        unsafe {
+            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+
+    fn alt_or_win_held() -> bool {
+        [0x12, 0xA4, 0xA5, 0x5B, 0x5C].iter().any(|&vk| down(vk))
+    }
+
+    fn modifier_pair(vk: u16) -> Option<i32> {
+        match vk {
+            0xA0 | 0xA1 => Some(0x10),
+            0xA2 | 0xA3 => Some(0x11),
+            0xA4 | 0xA5 => Some(0x12),
+            _ => None,
+        }
+    }
+
+    fn release_held_modifiers() {
+        const MODS: [u16; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C];
+        let mut inputs = Vec::new();
+        for vk in MODS {
+            if down(vk as i32) || modifier_pair(vk).is_some_and(down) {
+                inputs.push(key_input(vk, true));
+            }
+        }
+        if !inputs.is_empty() {
+            unsafe {
+                SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            }
+        }
     }
 
     // Held modifiers are let go so the app sees a plain Ctrl+key. They are not pressed again afterwards: if the
@@ -121,14 +183,10 @@ mod win {
     fn with_modifiers_released(k: u16) {
         // letting go of Alt or Win with nothing in between opens the app's menu bar or the Start menu, and the
         // Ctrl+C or Ctrl+V after it would go there instead, so a harmless key goes first
-        if [0x12, 0x5B, 0x5C].iter().any(|m| down(*m)) {
+        if alt_or_win_held() {
             mask_start_menu();
         }
-        for m in [0x5Bu16, 0x5C, 0x12, 0x10, 0x11] {
-            if down(m as i32) {
-                key(m, true);
-            }
-        }
+        release_held_modifiers();
         tap(k);
     }
     pub fn paste() {
@@ -144,11 +202,10 @@ mod win {
 
     /// Presses Backspace `n` times, with no modifier held.
     pub fn backspace(n: usize) {
-        for m in [0x5Bu16, 0x5C, 0x12, 0x10, 0x11] {
-            if down(m as i32) {
-                key(m, true);
-            }
+        if alt_or_win_held() {
+            mask_start_menu();
         }
+        release_held_modifiers();
         for _ in 0..n {
             key(0x08, false);
             key(0x08, true);
@@ -393,7 +450,105 @@ mod win {
         }
     }
 
-    pub fn focus_text_box() -> bool {
+    fn gui_focus_hwnd(fg: HWND) -> isize {
+        unsafe {
+            let tid = GetWindowThreadProcessId(fg, None);
+            if tid == 0 {
+                return 0;
+            }
+            let mut info = GUITHREADINFO {
+                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                ..Default::default()
+            };
+            if GetGUIThreadInfo(tid, &mut info).is_ok() {
+                info.hwndFocus.0 as isize
+            } else {
+                0
+            }
+        }
+    }
+
+    fn uia_focus_info() -> Option<(isize, i32, String, String)> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let auto: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let el = auto.GetFocusedElement().ok()?;
+            let hwnd = el.CurrentNativeWindowHandle().map(|h| h.0 as isize).unwrap_or(0);
+            let control_type = el.CurrentControlType().map(|c| c.0).unwrap_or(0);
+            let automation_id = el.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
+            let class_name = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+            Some((hwnd, control_type, automation_id, class_name))
+        }
+    }
+
+    pub fn capture_target() -> Option<super::TargetIdentity> {
+        unsafe {
+            let fg = GetForegroundWindow();
+            let fg_hwnd = fg.0 as isize;
+            if fg_hwnd == 0 {
+                return None;
+            }
+            let mut focus_hwnd = gui_focus_hwnd(fg);
+            let mut control_type = 0;
+            let mut automation_id = String::new();
+            let mut class_name = String::new();
+            if let Some((uia_hwnd, ct, aid, cls)) = uia_focus_info() {
+                if focus_hwnd == 0 {
+                    focus_hwnd = uia_hwnd;
+                }
+                control_type = ct;
+                automation_id = aid;
+                class_name = cls;
+            }
+            Some(super::TargetIdentity {
+                fg_hwnd,
+                focus_hwnd,
+                control_type,
+                automation_id,
+                class_name,
+            })
+        }
+    }
+
+    pub fn matches_target(expected: &super::TargetIdentity) -> bool {
+        unsafe {
+            let fg = GetForegroundWindow();
+            let fg_hwnd = fg.0 as isize;
+            if fg_hwnd == 0 || fg_hwnd != expected.fg_hwnd {
+                return false;
+            }
+            let cur_gui = gui_focus_hwnd(fg);
+            let uia = uia_focus_info();
+            if expected.focus_hwnd != 0 {
+                let cur_focus = if cur_gui != 0 {
+                    cur_gui
+                } else {
+                    uia.as_ref().map(|u| u.0).unwrap_or(0)
+                };
+                if cur_focus != expected.focus_hwnd {
+                    return false;
+                }
+            }
+            if let Some((_, ct, aid, cls)) = uia {
+                let had_uia = expected.control_type != 0
+                    || !expected.automation_id.is_empty()
+                    || !expected.class_name.is_empty();
+                if had_uia
+                    && (ct != expected.control_type
+                        || aid != expected.automation_id
+                        || cls != expected.class_name)
+                {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+
+    pub fn focus_text_box_cancellable(cancelled: &std::sync::atomic::AtomicBool) -> bool {
+        if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
