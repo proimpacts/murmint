@@ -100,6 +100,7 @@ struct Sess {
     idle_timer: u64,
     before_task: Option<tokio::task::JoinHandle<Option<String>>>,
     before: String,
+    target: Option<crate::native::TargetIdentity>,
 }
 
 static SESS: LazyLock<Mutex<Sess>> = LazyLock::new(|| {
@@ -306,6 +307,7 @@ async fn format_selection() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    let target = insertion::capture_target().await;
     let raw = match crate::insertion::copy_selection().await {
         Some(t) => t,
         None => {
@@ -328,9 +330,19 @@ async fn format_selection() {
         toast("info", "That text already looks good");
         return;
     }
-    let r = insertion::insert(&text).await;
+    let r = insertion::insert_into(&text, target.as_ref()).await;
     if !r.ok {
-        toast("error", r.error.as_deref().unwrap_or("Couldn't replace the selected text"));
+        let mut msg = r.error.unwrap_or_else(|| "Couldn't replace the selected text".into());
+        if r.method == "unplaced" && msg.contains("Focus moved") {
+            let clip_text = text.clone();
+            if tokio::task::spawn_blocking(move || insertion::write_clipboard_text(&clip_text))
+                .await
+                .unwrap_or(false)
+            {
+                msg = "Focus moved — formatted text copied to your clipboard".into();
+            }
+        }
+        toast("error", &msg);
         return;
     }
     let mut st = core::get().store.lock().unwrap();
@@ -766,6 +778,11 @@ pub async fn start(mode: &'static str) {
         g.notice = None;
         g.unplaced.clear();
         g.exe.clear();
+        g.ctx = None;
+        g.before_task = None;
+        g.before.clear();
+        g.target = None;
+        set_state(&mut g, St::Listening, json!({ "starting": true }));
     }
     let c = cfg();
     if c["formatting"]["useAI"] != json!(false) {
@@ -802,69 +819,42 @@ pub async fn start(mode: &'static str) {
                 finished: false,
                 timer: 0,
             });
-            n
-        };
-        let keywords: Vec<String> = vec![];
-        let language = crate::accent::language(&c);
-        let languages = if language == "auto" { vec![] } else { vec![language] };
-        let hint = String::new();
-        match crate::parse_cands(&json!([cand])).into_iter().next() {
-            Some(cand) => rt::open(
-                rt::OpenReq { stream, cand, languages, keywords, hint },
+            let language = crate::accent::language(&c);
+            let languages = if language == "auto" { vec![] } else { vec![language] };
+            rt::open(
+                rt::OpenReq { stream: n, cand, languages, keywords: vec![], hint: String::new() },
                 std::sync::Arc::new(on_rt_event),
-            ),
-            None => rt_fail("Live transcription is unavailable"),
+            );
+        } else if let Some(r) = primary {
+            hub::prewarm(&r);
         }
-    } else if let Some(r) = primary {
-        hub::prewarm(&r);
     }
-
-    {
-        let mut g = s();
-        if g.id != sid {
-            return;
-        }
-        set_state(&mut g, St::Listening, json!({ "starting": true }));
-    }
-    let (streaming, live_on) =
-        (c["dictation"]["streaming"] != json!(false) && mode != "handsfree", s().rt.is_some());
+    let streaming = c["dictation"]["streaming"] != json!(false) && mode != "handsfree";
     let d = &c["dictation"];
     let support = d["speechSupport"] == json!(true);
-    recorder(
-        "start",
-        json!({
-            "deviceId": d["micDeviceId"], "stream": live_on, "continuous": live_on || mode == "handsfree" || streaming,
-            "preview": d["livePreview"] == json!(true) && !streaming && !live_on && mode != "handsfree",
-            "silenceMs": if mode == "handsfree" {
-                stretch(&d["silenceMs"], support)
-            } else {
-                json!(d["streamPauseMs"].as_u64().filter(|n| *n > 0).unwrap_or(550))
-            },
-            "autoStopMs": if mode == "hold" { json!(0) } else { stretch(&json!(d["autoStopMs"].as_u64().unwrap_or(3000)), support) },
-            "noiseGate": d["noiseGate"], "sounds": c["appearance"]["sounds"],
-        }),
-    );
-    let (app, site) = tokio::task::spawn_blocking(|| {
+    let (app, site, target) = tokio::task::spawn_blocking(|| {
         let app = crate::native::foreground_full();
         let site = if crate::native::BROWSERS.contains(&app.0.to_lowercase().as_str()) {
             crate::native::site_for(&app.2, &app.1)
         } else {
             None
         };
-        (app, site)
+        let target = crate::native::capture_target();
+        (app, site, target)
     })
     .await
     .unwrap_or_default();
     let app_v = json!({ "process": app.0, "title": app.1 });
     let ctx = resolve_context(&c, &app_v);
-    formatter::warm(&ctx);
-    {
+    let stop_now = {
         let mut g = s();
-        if g.id != sid {
+        if !current(&g, sid) {
             return;
         }
+        formatter::warm(&ctx);
         g.ctx = Some(ctx.clone());
         g.exe = app.2.clone();
+        g.target = target;
         g.before.clear();
         // read message context now, before anything is typed
         g.before_task = if c["dictation"]["messageContext"] == json!(true) || c["dictation"]["boxJoin"] == json!(true) {
@@ -1490,21 +1480,59 @@ async fn commit(raw: &str, sec: f64, stt_ref: Option<String>, stt_cost: f64) {
         }
     }
     if text.is_empty() {
-        s().skip_msg = Some("Didn't catch that".into());
+        let mut g = s();
+        if current(&g, sid) { g.skip_msg = Some("Didn't catch that".into()); }
         return;
     }
 
+    let mut target = {
+        let g = s();
+        if !current(&g, sid) {
+            return;
+        }
+        g.target.clone()
+    };
+    if let Some(ref t) = target {
+        if t.fg_hwnd != 0 {
+            let expected_fg = t.fg_hwnd;
+            let same_window = tokio::task::spawn_blocking(move || {
+                crate::native::capture_target().is_some_and(|cur| cur.fg_hwnd == expected_fg)
+            })
+            .await
+            .unwrap_or(false);
+            if !same_window {
+                save_history(sid, raw, &text, sec, stt_ref, stt_cost, &f, &ctx, false);
+                return;
+            }
+        }
+    }
     let autotype_on = cfg()["dictation"]["autoType"] != json!(false);
-    if !insertion::target_editable().await && !(autotype_on && insertion::autotype().await) {
-        s().unplaced.push(text.clone());
-        save_history(raw, &text, sec, stt_ref, stt_cost, &f, &ctx, false);
-        return;
+    if !insertion::target_editable().await {
+        if !(autotype_on && insertion::autotype().await) {
+            save_history(sid, raw, &text, sec, stt_ref, stt_cost, &f, &ctx, false);
+            return;
+        }
+        if !current(&s(), sid) {
+            return;
+        }
+        let refreshed = insertion::capture_target().await;
+        if target
+            .as_ref()
+            .is_some_and(|orig| orig.fg_hwnd != 0 && refreshed.as_ref().is_none_or(|r| r.fg_hwnd != orig.fg_hwnd))
+        {
+            save_history(sid, raw, &text, sec, stt_ref, stt_cost, &f, &ctx, false);
+            return;
+        }
+        target = refreshed;
     }
 
     let mut prefix = String::new();
     let mut erase = 0;
     {
         let g = s();
+        if !current(&g, sid) {
+            return;
+        }
         let join = (g.inserted == 0 && cfg()["dictation"]["boxJoin"] == json!(true))
             .then(|| join::continue_in_box(&ctx.before, &text))
             .flatten();
@@ -1594,6 +1622,7 @@ pub fn test_reset() {
     g.inserted = 0;
     g.session_text.clear();
     g.rt = None;
+    g.target = None;
     g.pcm.clear();
     g.last_error = None;
     g.skip_msg = None;

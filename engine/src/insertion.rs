@@ -236,7 +236,32 @@ pub use clip::write_text as write_clipboard_text;
 #[cfg(test)]
 pub static TEST_SINK: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 
-static LAST: std::sync::Mutex<Option<(String, &'static str)>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+pub static TEST_TARGET_MOVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+static LAST: std::sync::Mutex<Option<(String, &'static str, Option<crate::native::TargetIdentity>)>> =
+    std::sync::Mutex::new(None);
+
+pub async fn capture_target() -> Option<crate::native::TargetIdentity> {
+    tokio::task::spawn_blocking(crate::native::capture_target)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn target_matches(expected: Option<&crate::native::TargetIdentity>) -> bool {
+    let Some(exp) = expected else {
+        return true;
+    };
+    #[cfg(test)]
+    if TEST_TARGET_MOVED.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    let exp = exp.clone();
+    tokio::task::spawn_blocking(move || crate::native::matches_target(&exp))
+        .await
+        .unwrap_or(false)
+}
 
 pub async fn target_editable() -> bool {
     #[cfg(test)]
@@ -319,7 +344,9 @@ pub async fn copy_selection() -> Option<String> {
             break;
         }
     }
-    tokio::task::spawn_blocking(move || clip::restore(&snap)).await.ok();
+    if let Some(s) = snap {
+        tokio::task::spawn_blocking(move || restore_snap_sync(&s)).await.ok();
+    }
     drop(hold);
     text
 }
@@ -353,17 +380,38 @@ fn split_for_paste(text: &str, limit: usize) -> Vec<String> {
     out
 }
 
-/// Erases `n` characters before the cursor, for box joining.
-pub async fn erase(n: usize) {
+/// Erases `n` characters before the cursor if focus still matches `expected`, for box joining.
+pub async fn erase_in(n: usize, expected: Option<&crate::native::TargetIdentity>) -> bool {
+    if !target_matches(expected).await {
+        return false;
+    }
     #[cfg(test)]
     if let Some(sink) = TEST_SINK.lock().unwrap().as_mut() {
         sink.push(format!("<erase {n}>"));
-        return;
+        return true;
     }
     let _ = tokio::task::spawn_blocking(move || crate::native::backspace(n)).await;
+    true
+}
+
+/// Erases `n` characters before the cursor, for box joining.
+#[allow(dead_code)]
+pub async fn erase(n: usize) {
+    let _ = erase_in(n, None).await;
 }
 
 pub async fn insert(text: &str) -> Inserted {
+    insert_into(text, None).await
+}
+
+pub async fn insert_into(text: &str, expected: Option<&crate::native::TargetIdentity>) -> Inserted {
+    if !target_matches(expected).await {
+        return Inserted {
+            ok: false,
+            method: "unplaced",
+            error: Some("Focus moved to another field".into()),
+        };
+    }
     #[cfg(test)]
     if let Some(sink) = TEST_SINK.lock().unwrap().as_mut() {
         sink.push(text.to_string());
@@ -531,7 +579,19 @@ pub async fn undo() -> Value {
 
 #[cfg(test)]
 mod paste_split_tests {
-    use super::split_for_paste;
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct TestCleanup;
+    impl Drop for TestCleanup {
+        fn drop(&mut self) {
+            *TEST_SINK.lock().unwrap() = None;
+            TEST_TARGET_MOVED.store(false, Ordering::SeqCst);
+            *LAST.lock().unwrap() = None;
+        }
+    }
 
     #[test]
     fn long_text_is_split_at_lines_or_spaces_and_nothing_is_lost() {

@@ -581,6 +581,9 @@ mod win {
             let n = found.Length().unwrap_or(0).min(400);
             let mut best: Option<(IUIAutomationElement, i32, i32)> = None;
             for i in 0..n {
+                if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    return false;
+                }
                 let Ok(el) = found.GetElement(i) else { continue };
                 if !el.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false) {
                     continue;
@@ -612,7 +615,7 @@ mod win {
                 }
             }
             match best {
-                Some((el, _, _)) => el.SetFocus().is_ok(),
+                Some((el, _, _)) => !cancelled.load(std::sync::atomic::Ordering::SeqCst) && el.SetFocus().is_ok(),
                 None => false,
             }
         }
