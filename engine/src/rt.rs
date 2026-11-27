@@ -155,10 +155,26 @@ async fn task(key: String, cand: Cand, first: Attach) {
     let (att_tx, att_rx) = mpsc::channel::<Attach>(1);
     let busy = Arc::new(AtomicBool::new(true));
     SLOTS.lock().unwrap().insert(key.clone(), Slot { attach: att_tx, busy: busy.clone() });
-    run(&cand, first, att_rx, busy.clone()).await;
+    run(&key, &cand, first, att_rx, busy.clone()).await;
     let mut s = SLOTS.lock().unwrap();
     if s.get(&key).map(|x| Arc::ptr_eq(&x.busy, &busy)).unwrap_or(false) {
         s.remove(&key);
+    }
+}
+
+fn drain_pending(key: &str, cand: &Cand, att_rx: &mut mpsc::Receiver<Attach>, busy: &Arc<AtomicBool>) {
+    busy.store(true, Ordering::SeqCst);
+    {
+        let mut s = SLOTS.lock().unwrap();
+        if s.get(key).is_some_and(|x| Arc::ptr_eq(&x.busy, busy)) {
+            s.remove(key);
+        }
+    }
+    att_rx.close();
+    while let Ok(mut pending) = att_rx.try_recv() {
+        if matches!(pending.cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+            tokio::spawn(task(key.to_string(), cand.clone(), pending));
+        }
     }
 }
 
@@ -172,7 +188,9 @@ struct State {
     item_gap: HashMap<String, Option<u64>>,
     since_commit: usize,
     total_samples: u64,
+    stopping: bool,
     finalizing: bool,
+    incomplete: bool,
 }
 
 struct Cur {
@@ -279,10 +297,32 @@ async fn run(cand: &Cand, first: Attach, mut att_rx: mpsc::Receiver<Attach>, bus
         Ok(r) => r,
         Err(e) => return fail(&first, format!("bad real-time address: {e}")),
     };
-    if !cand.key.is_empty() {
-        request.headers_mut().insert("authorization", format!("Bearer {}", cand.key).parse().unwrap());
+    if request.uri().host().is_none() {
+        return fail(&first, "bad real-time address: missing host".into());
     }
-    let ws = match tokio::time::timeout(Duration::from_secs(10), connect_async(request)).await {
+    let auth_key = cand.key.trim();
+    if !auth_key.is_empty() {
+        if !auth_key.is_ascii() || auth_key.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            fail(&first, "Invalid characters in API key".into());
+            return;
+        }
+        let auth = match format!("Bearer {auth_key}").parse() {
+            Ok(v) => v,
+            Err(_) => {
+                fail(&first, "Invalid characters in API key".into());
+                return;
+            }
+        };
+        request.headers_mut().insert("authorization", auth);
+    }
+    let connected = tokio::select! {
+        _ = &mut first.cancel => {
+            emit(&first.sink, first.stream, json!({ "type": "closed" }));
+            return;
+        }
+        result = tokio::time::timeout(Duration::from_secs(10), connect_async(request)) => result,
+    };
+    let ws = match connected {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(e)) => return fail(&first, format!("Couldn't open the live connection: {e}")),
         Err(_) => return fail(&first, "Live connection timed out".into()),
@@ -379,31 +419,43 @@ async fn run(cand: &Cand, first: Attach, mut att_rx: mpsc::Receiver<Attach>, bus
                 match a {
                     Some(att) => {
                         cur = Some(Cur { att, st: State::default() });
-                        if !configure(&mut tx, cand, cur.as_ref().unwrap()).await { break; }
+                        if !configure(&mut tx, cand, cur.as_mut().unwrap()).await { cur.take(); break; }
                     }
                     None => break,
                 }
             }
             _ = tokio::time::sleep_until(final_deadline.unwrap_or(idle_deadline)), if final_deadline.is_some() => {
-                detach!("done");
+                if let Some(c) = cur.take() {
+                    fail(&c.att, "The live connection did not finish all turns".into());
+                }
+                break;
             }
             _ = tokio::time::sleep_until(idle_deadline), if idle => { break; }
             _ = ping.tick() => { if tx.send(Message::Ping(vec![].into())).await.is_err() { break; } }
         }
     }
     if let Some(c) = cur.take() {
-        STREAMS.lock().unwrap().remove(&c.att.stream);
+        fail(&c.att, "The live connection stopped before transcription finished".into());
     }
-    busy.store(true, Ordering::SeqCst);
-    let _ = tx.close().await;
+    drain_pending(key, cand, &mut att_rx, &busy);
+    let _ = tokio::time::timeout(Duration::from_millis(250), tx.close()).await;
 }
 
-async fn configure<S>(tx: &mut S, cand: &Cand, cur: &Cur) -> bool
+async fn configure<S>(tx: &mut S, cand: &Cand, cur: &mut Cur) -> bool
 where
     S: futures_util::Sink<Message> + Unpin,
 {
     let su = session_update(cand, &cur.att.languages, &cur.att.keywords, &cur.att.hint);
-    if tx.send(Message::text(su.to_string())).await.is_err() {
+    let sent = tokio::select! {
+        biased;
+        _ = &mut cur.att.cancel => {
+            emit(&cur.att.sink, cur.att.stream, json!({ "type": "closed" }));
+            STREAMS.lock().unwrap().remove(&cur.att.stream);
+            return false;
+        }
+        sent = tokio::time::timeout(Duration::from_secs(8), tx.send(Message::text(su.to_string()))) => sent,
+    };
+    if !matches!(sent, Ok(Ok(()))) {
         emit(
             &cur.att.sink,
             cur.att.stream,
@@ -732,5 +784,81 @@ mod tests {
         let e = tokio::time::timeout(Duration::from_secs(12), rx.recv()).await.unwrap().unwrap();
         assert_eq!((e["type"].as_str(), e["fatal"].as_bool()), (Some("error"), Some(true)));
         assert!(e["message"].as_str().unwrap().contains("live connection"));
+    }
+
+    #[tokio::test]
+    async fn invalid_api_key_emits_fatal_error_without_panicking() {
+        let (s, mut rx) = sink();
+        let mut c = cand("http://127.0.0.1:1/v1", "gpt-live-transcribe");
+        c.key = "sk-\u{200b}bad".into();
+        open(
+            OpenReq {
+                stream: 9007,
+                cand: c,
+                languages: vec![],
+                keywords: vec![],
+                hint: String::new(),
+            },
+            s,
+        );
+        let e = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert_eq!((e["type"].as_str(), e["fatal"].as_bool()), (Some("error"), Some(true)));
+        assert!(e["message"].as_str().unwrap().contains("Invalid characters in API key"));
+    }
+
+    #[tokio::test]
+    async fn pending_attach_drained_at_run_exit_opens_fresh_connection() {
+        let (base, stats) = mock(false).await;
+        let cand_val = cand(&base, "gpt-live-transcribe");
+        let key = format!("{}_drain_test", slot_key(&cand_val));
+
+        let (att_tx, mut att_rx) = mpsc::channel::<Attach>(1);
+        let busy = Arc::new(AtomicBool::new(false));
+        SLOTS.lock().unwrap().insert(key.clone(), Slot { attach: att_tx.clone(), busy: busy.clone() });
+
+        let (s, mut rx) = sink();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        STREAMS.lock().unwrap().insert(9008, Stream { commands: cmd_tx, cancel: cancel_tx });
+        att_tx
+            .try_send(Attach {
+                stream: 9008,
+                cmd_rx,
+                languages: vec![],
+                keywords: vec![],
+                hint: String::new(),
+                sink: s,
+                cancel: cancel_rx,
+            })
+            .unwrap();
+
+        drain_pending(&key, &cand_val, &mut att_rx, &busy);
+        assert!(busy.load(Ordering::SeqCst));
+        next(&mut rx, "ready").await;
+        cmd(9008, Cmd::Close);
+        next(&mut rx, "closed").await;
+        assert_eq!(stats.lock().unwrap().connections, 1);
+
+        // Cancelled pending attach should not spawn a new connection.
+        let (att_tx2, mut att_rx2) = mpsc::channel::<Attach>(1);
+        let busy2 = Arc::new(AtomicBool::new(false));
+        let (s2, _rx2) = sink();
+        let (_cmd_tx2, cmd_rx2) = mpsc::unbounded_channel();
+        let (cancel_tx2, cancel_rx2) = oneshot::channel();
+        let _ = cancel_tx2.send(());
+        att_tx2
+            .try_send(Attach {
+                stream: 9009,
+                cmd_rx: cmd_rx2,
+                languages: vec![],
+                keywords: vec![],
+                hint: String::new(),
+                sink: s2,
+                cancel: cancel_rx2,
+            })
+            .unwrap();
+        drain_pending(&key, &cand_val, &mut att_rx2, &busy2);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(stats.lock().unwrap().connections, 1);
     }
 }
