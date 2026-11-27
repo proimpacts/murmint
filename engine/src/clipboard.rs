@@ -1,45 +1,76 @@
 //! Better Clipboard: notices what you copy, and takes over Win+V so Murmint's clipboard opens instead of Windows'.
 //! Copies marked private (password managers, and every paste and clipboard restore Murmint makes) are never kept.
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Better Clipboard is on: copies are reported and Win+V is taken over.
 pub static ON: AtomicBool = AtomicBool::new(false);
 /// The clipboard's change number right after Murmint last wrote to it, so that write is not reported as a copy.
 static OWN: AtomicU32 = AtomicU32::new(0);
+/// Epoch-millisecond deadline until which clipboard-watch suppresses capturing self-triggered writes.
+static SUPPRESS_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 pub fn mark_own() {
     OWN.store(win::sequence(), Ordering::Relaxed);
 }
 
+pub fn suppress_capture(ms: u64) {
+    let until = now_ms().saturating_add(ms);
+    SUPPRESS_UNTIL.fetch_max(until, Ordering::SeqCst);
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn history_blocked_by_bytes(bytes: Option<&[u8]>) -> bool {
+    match bytes {
+        Some(b) if b.len() >= 4 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) == 0,
+        _ => true,
+    }
+}
+
 /// The first animated GIF an HTML fragment shows, such as a GIF copied from a web page.
 pub fn gif_in_html(html: &str) -> Option<String> {
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     let mut at = 0;
-    while let Some(i) = lower[at..].find("<img") {
+    while at < lower.len() {
+        let Some(i) = lower[at..].find("<img") else {
+            break;
+        };
         let tag_start = at + i;
         let tag_end = lower[tag_start..].find('>').map_or(lower.len(), |e| tag_start + e);
-        let tag = &html[tag_start..tag_end];
-        if let Some(src) = attr(tag, "src") {
-            let path = src.split(['?', '#']).next().unwrap_or("").to_lowercase();
-            if src.starts_with("https://") && path.ends_with(".gif") {
-                return Some(src);
+        if let Some(tag) = html.get(tag_start..tag_end) {
+            if let Some(src) = attr(tag, "src") {
+                let path = src.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+                if src.starts_with("https://") && path.ends_with(".gif") {
+                    return Some(src);
+                }
             }
         }
-        at = tag_end;
+        if tag_end >= lower.len() {
+            break;
+        }
+        at = tag_end + 1;
     }
     None
 }
 
 fn attr(tag: &str, name: &str) -> Option<String> {
-    let lower = tag.to_lowercase();
-    let i = lower.find(&format!("{name}="))? + name.len() + 1;
-    let rest = &tag[i..];
+    let lower = tag.to_ascii_lowercase();
+    let needle = format!("{}=", name.to_ascii_lowercase());
+    let i = lower.find(&needle)? + needle.len();
+    let rest = tag.get(i..)?;
     let (q, rest) = match rest.chars().next()? {
-        c @ ('"' | '\'') => (c, &rest[1..]),
+        c @ ('"' | '\'') => (c, rest.get(1..)?),
         _ => (' ', rest),
     };
-    Some(rest[..rest.find(q).unwrap_or(rest.len())].replace("&amp;", "&"))
+    let end = rest.find(q).unwrap_or(rest.len());
+    Some(rest.get(..end)?.replace("&amp;", "&"))
 }
 
 /// Watches for copies and listens for Win+V (and Win+. or Win+; for the emoji page). `emit` gets ("clipboard:copied", copy) and ("clipboard:open", target).
