@@ -166,12 +166,19 @@ pub fn prewarm(r: &str) {
 }
 
 pub async fn test(provider_id: &str) -> Value {
-    let (provider, key) = {
+    let (provider, key, local_only) = {
         let s = core::get().store.lock().unwrap();
-        (s.provider(provider_id).cloned(), s.get_secret(provider_id))
+        (
+            s.provider(provider_id).cloned(),
+            s.get_secret(provider_id),
+            s.config["privacy"]["localOnly"] == json!(true),
+        )
     };
     let Some(p) = provider else { return json!({ "ok": false, "error": "Unknown provider" }) };
-    if key.is_empty() {
+    if local_only && !crate::route::on_this_pc(&p) {
+        return json!({ "ok": false, "error": "Blocked while local-only mode is enabled" });
+    }
+    if key.is_empty() && p["keyOptional"] != json!(true) {
         return json!({ "ok": false, "error": "No API key saved" });
     }
     if p["type"] == "cloudflare" && p["accountId"].as_str().unwrap_or("").is_empty() {
