@@ -12,6 +12,7 @@ function locate() {
     process.resourcesPath && path.join(process.resourcesPath, 'bin', EXE),
     path.join(__dirname, '..', '..', 'bin', EXE),
     path.join(__dirname, '..', '..', 'engine', 'target', 'release', EXE),
+    path.join(__dirname, '..', '..', 'engine', 'target', 'debug', EXE),
   ].filter(Boolean);
   return candidates.find((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } }) || null;
 }
