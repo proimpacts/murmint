@@ -134,27 +134,35 @@
       if (!final && (!s.hadSpeech || s.samples < RATE * 0.3)) return;
       const gapMs = this.prevTrail == null ? null : Math.round(this.prevTrail + ((s.lead || 0) / RATE) * 1000);
       this.prevTrail = (s.silentRun / RATE) * 1000;
-      if (this.opts.stream) { this.h.onBoundary({ final, peak: s.peak, gapMs }); return; }
+      if (this.opts.stream) { this.h.onBoundary(this.opts.captureId, { final, peak: s.peak, gapMs }); return; }
       const trimmed = trimSilence(concat(s.chunks), Math.max(0.010, this.noiseFloor * 2.5));
-      this.h.onSegment({ wav: encodeWav(trimmed), durationSec: trimmed.length / RATE, peak: s.peak, final, gapMs });
+      this.h.onSegment(this.opts.captureId, { wav: encodeWav(trimmed), durationSec: trimmed.length / RATE, peak: s.peak, final, gapMs });
     }
 
-    async _preview() {
+    async _preview(generation) {
       const s = this.seg;
       if (!this.recording || this.paused || this.previewBusy || !s.hadSpeech || s.samples < RATE) return;
       this.previewBusy = true;
       try {
         const chunks = s.chunks.slice(-Math.ceil((8 * RATE) / BLOCK));
-        const text = await this.h.onPreview({ wav: encodeWav(concat(chunks)), durationSec: (chunks.length * BLOCK) / RATE });
-        if (this.recording && text) this.h.onCaption(text);
-      } finally { this.previewBusy = false; }
+        const text = await this.h.onPreview(this.opts.captureId, { wav: encodeWav(concat(chunks)), durationSec: (chunks.length * BLOCK) / RATE });
+        if (generation === this.generation && this.recording && !this.paused && text) this.h.onCaption(text);
+      } catch { /* previews can be dropped if the engine stops */ }
+      finally { if (generation === this.generation) this.previewBusy = false; }
     }
 
     pause() { this.paused = true; }
-    resume() { this.paused = false; }
+    resume() { this.lastSpeechAt = this.now() + 3000; this.paused = false; }
     stop() { if (!this.recording) return; this.recording = false; this.ring = []; clearInterval(this.previewTimer); this._emit(true); this._scheduleRelease(); }
-    cancel() { this.recording = false; this.ring = []; this.paused = false; clearInterval(this.previewTimer); this._resetSeg(); this._scheduleRelease(); }
-    _scheduleRelease() { clearTimeout(this.warmTimer); this.warmTimer = setTimeout(() => this._releaseMic(), WARM_MS); if (this.warmTimer && this.warmTimer.unref) this.warmTimer.unref(); }
+    cancel() {
+      ++this.generation;
+      this.recording = this.paused = false;
+      clearInterval(this.previewTimer);
+      clearTimeout(this.warmTimer);
+      this._resetSeg();
+      this._teardown();
+    }
+    _scheduleRelease() { clearTimeout(this.warmTimer); this.warmTimer = setTimeout(() => this._teardown(), WARM_MS); if (this.warmTimer && this.warmTimer.unref) this.warmTimer.unref(); }
   }
 
   window.Recorder = Recorder;
