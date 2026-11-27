@@ -47,12 +47,14 @@ const store = {
 
 function migrateFromSayso(dest) {
   try {
-    if (fs.existsSync(path.join(dest, 'config.json'))) return;
+    const marker = path.join(dest, '.sayso-migrated');
+    if (fs.existsSync(marker)) return;
     for (const name of ['Sayso', 'sayso']) {
       const src = path.join(app.getPath('appData'), name, 'data');
       if (!fs.existsSync(path.join(src, 'config.json'))) continue;
       fs.mkdirSync(dest, { recursive: true });
-      for (const f of ['config.json', 'history.json', 'usage.json']) if (fs.existsSync(path.join(src, f))) fs.copyFileSync(path.join(src, f), path.join(dest, f));
+      for (const f of ['config.json', 'history.json', 'usage.json']) { const from = path.join(src, f), to = path.join(dest, f); if (fs.existsSync(from) && !fs.existsSync(to)) fs.copyFileSync(from, to); }
+      fs.writeFileSync(marker, '1');
       return;
     }
   } catch (e) { console.error('migration skipped:', e.message); }
@@ -63,8 +65,9 @@ async function migrateAccount(dataDir) {
   const file = path.join(dataDir, 'account.bin');
   if (!fs.existsSync(file) || !safeStorage.isEncryptionAvailable()) return;
   try {
-    await core.ui('account:import', JSON.parse(safeStorage.decryptString(fs.readFileSync(file))));
-    fs.rmSync(file, { force: true });
+    const r = await core.ui('account:import', JSON.parse(safeStorage.decryptString(fs.readFileSync(file))));
+    if (r && r.ok) fs.rmSync(file, { force: true });
+
   } catch (e) { console.error('sign-in migration skipped:', e.message); }
 }
 
