@@ -191,8 +191,9 @@ app.on('second-instance', () => windows?.createMain());
 const isOpen = () => !!shell.state?.account && shell.config?.onboarded === true;
 async function gate() {
   const open = isOpen();
+  if (open) { await windows.ensureOverlay(); applySideEffects(); }
   await core.lock(!open).catch(() => {});
-  if (open && !windows.overlay) { windows.createOverlay(); applySideEffects(); }
+
   betterClipboard.enable(core, open && shell.config?.clipboard?.enabled !== false).catch(() => {});
 }
 
