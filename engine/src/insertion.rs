@@ -11,7 +11,7 @@ pub struct Inserted {
 
 #[cfg(windows)]
 mod clip {
-    use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+    use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardFormatNameW,
         OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -88,7 +88,7 @@ mod clip {
         ] {
             let fmt = RegisterClipboardFormatW(name);
             if fmt != 0 {
-                set_raw(fmt, &data);
+                let _ = set_raw(fmt, &data);
             }
         }
     }
@@ -154,7 +154,9 @@ mod clip {
     pub fn write_text(text: &str) -> bool {
         let ok = write(text, false);
         // kept on the clipboard on purpose, but it is a dictation, not a copy
-        crate::clipboard::mark_own();
+        if ok {
+            crate::clipboard::mark_own();
+        }
         ok
     }
     pub fn write_text_private(text: &str) -> bool {

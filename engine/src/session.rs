@@ -1456,23 +1456,24 @@ async fn commit(raw: &str, sec: f64, stt_ref: Option<String>, stt_cost: f64) {
             prefix = " ".into();
         }
     }
-    if erase > 0 {
-        insertion::erase(erase).await;
+    if erase > 0 && !insertion::erase_in(erase, target.as_ref()).await {
+        save_history(sid, raw, &text, sec, stt_ref, stt_cost, &f, &ctx, false);
+        return;
     }
-    let res = insertion::insert(&format!("{prefix}{text}")).await;
+    let res = insertion::insert_into(&format!("{prefix}{text}"), target.as_ref()).await;
     if !res.ok {
-        s().last_error = None;
-        toast("info", "Couldn’t paste automatically, the text is on your clipboard. Press Ctrl+V.");
+        let msg = if res.method == "clipboard" {
+            "Couldn’t paste automatically, the text is on your clipboard. Press Ctrl+V."
+        } else {
+            res.error.as_deref().unwrap_or("Couldn’t paste automatically — click Copy on the pill")
+        };
+        toast("info", msg);
     }
-    {
-        let mut g = s();
-        g.inserted += 1;
-        g.session_text.push(text.clone());
-    }
-    save_history(raw, &text, sec, stt_ref, stt_cost, &f, &ctx, res.ok);
+    save_history(sid, raw, &text, sec, stt_ref, stt_cost, &f, &ctx, res.ok);
 }
 
 fn save_history(
+    sid: u64,
     raw: &str,
     text: &str,
     sec: f64,
