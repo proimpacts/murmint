@@ -65,11 +65,38 @@ fn root() -> PathBuf {
     let dir = core::get().store.lock().unwrap().dir.clone();
     dir.parent().unwrap_or(&dir).join("models")
 }
+fn non_empty(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
+}
+fn done_in(dir: &Path, p: &Part) -> bool {
+    let ok_path = dir.join(format!("{}.ok", p.id));
+    if !std::fs::read_to_string(&ok_path).is_ok_and(|s| s == p.sha256) {
+        return false;
+    }
+    let present = if p.zip {
+        let wdir = dir.join("whisper");
+        non_empty(&wdir.join("whisper-server.exe"))
+            && std::fs::read_dir(&wdir).ok().is_some_and(|rd| {
+                rd.flatten().any(|e| {
+                    let path = e.path();
+                    path.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("dll"))
+                        && non_empty(&path)
+                })
+            })
+    } else {
+        non_empty(&dir.join(MODEL_FILE))
+    };
+    if !present {
+        let _ = std::fs::remove_file(&ok_path);
+        return false;
+    }
+    true
+}
 fn done(p: &Part) -> bool {
-    std::fs::read_to_string(root().join(format!("{}.ok", p.id))).is_ok_and(|s| s == p.sha256)
+    done_in(&root(), p)
 }
 pub fn installed() -> bool {
-    PARTS.iter().all(done)
+    core::try_get().is_some() && PARTS.iter().all(done)
 }
 
 #[cfg(windows)]
@@ -631,5 +658,99 @@ mod tests {
         assert!(f.contains(&"Release/whisper-server.exe".to_string()));
         assert!(f.contains(&"Release/ggml-cpu-x64.dll".to_string()));
         assert_eq!(f.len(), 13);
+    }
+
+    #[test]
+    fn done_requires_non_empty_artifacts_and_clears_stale_ok_stamps() {
+        let dir = std::env::temp_dir().join(format!("murmint-m29-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("whisper")).unwrap();
+
+        let whisper_ok = dir.join("whisper.ok");
+        let stt_ok = dir.join("stt.ok");
+        std::fs::write(&whisper_ok, PARTS[0].sha256).unwrap();
+        std::fs::write(&stt_ok, PARTS[1].sha256).unwrap();
+
+        // Missing binaries -> false and removes stale .ok files
+        assert!(!done_in(&dir, &PARTS[0]));
+        assert!(!whisper_ok.exists());
+        assert!(!done_in(&dir, &PARTS[1]));
+        assert!(!stt_ok.exists());
+
+        // Zero-length artifacts -> false and removes stale .ok files
+        std::fs::write(&whisper_ok, PARTS[0].sha256).unwrap();
+        std::fs::write(dir.join("whisper").join("whisper-server.exe"), b"").unwrap();
+        std::fs::write(dir.join("whisper").join("whisper.dll"), b"dll").unwrap();
+        assert!(!done_in(&dir, &PARTS[0]));
+        assert!(!whisper_ok.exists());
+
+        // Non-empty required artifacts -> true
+        std::fs::write(&whisper_ok, PARTS[0].sha256).unwrap();
+        std::fs::write(dir.join("whisper").join("whisper-server.exe"), b"exe").unwrap();
+        assert!(done_in(&dir, &PARTS[0]));
+
+        std::fs::write(&stt_ok, PARTS[1].sha256).unwrap();
+        std::fs::write(dir.join(MODEL_FILE), b"bin").unwrap();
+        assert!(done_in(&dir, &PARTS[1]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn fetch_to_aborts_stalled_download_on_cancel_and_allows_retry() {
+        use tokio::io::AsyncWriteExt;
+        let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_addr = stalled.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = stalled.accept().await {
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf).await;
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npart").await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+
+        let healthy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let healthy_addr = healthy.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = healthy.accept().await {
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf).await;
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello").await;
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("murmint-m23-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let gen1 = {
+            let _guard = DL_LOCK.lock().unwrap();
+            CANCEL.store(false, Ordering::SeqCst);
+            DL_GEN.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        let stalled_url: &'static str = Box::leak(format!("http://{stalled_addr}/model").into_boxed_str());
+        let p1 = Part { id: "t1", label: "Test", url: stalled_url, size: 100, sha256: "0", zip: false };
+        let f1 = dir.join(format!("test.{gen1}.part"));
+
+        let f1_clone = f1.clone();
+        let h = tokio::spawn(async move { fetch_to(&p1, &f1_clone, 0, gen1).await });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let t0 = Instant::now();
+        cancel();
+        let res1 = h.await.unwrap();
+        assert_eq!(res1.unwrap_err(), "cancelled");
+        assert!(t0.elapsed() < Duration::from_secs(2), "cancel must abort stalled read promptly");
+
+        let gen2 = {
+            let _guard = DL_LOCK.lock().unwrap();
+            CANCEL.store(false, Ordering::SeqCst);
+            DL_GEN.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        let healthy_url: &'static str = Box::leak(format!("http://{healthy_addr}/model").into_boxed_str());
+        let p2 = Part { id: "t2", label: "Test", url: healthy_url, size: 5, sha256: "0", zip: false };
+        let f2 = dir.join(format!("test.{gen2}.part"));
+        fetch_to(&p2, &f2, 0, gen2).await.unwrap();
+        assert_eq!(std::fs::read(&f2).unwrap(), b"hello");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
