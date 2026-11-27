@@ -383,18 +383,30 @@ impl Store {
         self.touch("config.json");
     }
 
-    pub fn set_secret(&mut self, id: &str, value: &str) {
+    pub fn try_set_secret(&mut self, id: &str, value: &str) -> Result<(), String> {
         if value.is_empty() {
             self.secrets.remove(id);
         } else {
-            let enc = dpapi::protect(value.as_bytes())
-                .map(|b| json!({ "enc": "dpapi", "v": base64::engine::general_purpose::STANDARD.encode(b) }))
-                .unwrap_or_else(
-                    || json!({ "enc": false, "v": base64::engine::general_purpose::STANDARD.encode(value) }),
-                );
+            #[cfg(test)]
+            let protected = if FORCE_DPAPI_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
+                None
+            } else {
+                dpapi::protect(value.as_bytes())
+            };
+            #[cfg(not(test))]
+            let protected = dpapi::protect(value.as_bytes());
+            let Some(b) = protected else {
+                return Err("Credential encryption (DPAPI) failed; secret was not saved.".into());
+            };
+            let enc = json!({ "enc": "dpapi", "v": base64::engine::general_purpose::STANDARD.encode(b) });
             self.secrets.insert(id.to_string(), enc);
         }
         self.touch("secrets.json");
+        Ok(())
+    }
+
+    pub fn set_secret(&mut self, id: &str, value: &str) {
+        let _ = self.try_set_secret(id, value);
     }
     pub fn get_secret(&self, id: &str) -> String {
         let Some(s) = self.secrets.get(id) else { return String::new() };

@@ -143,25 +143,39 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
         "provider:key" => {
             let id = arg(0).as_str().unwrap_or("").to_string();
             let raw = arg(1).as_str().unwrap_or("").to_string();
-            with_store(|s| {
+            let res = with_store(|s| {
                 let cf = s.provider(&id).is_some_and(|p| p["type"] == "cloudflare");
-                let key = if cf {
-                    clean_token(&raw)
-                } else {
-                    crate::re!(r"(?i)^bearer\s+").replace(raw.trim(), "").to_string()
-                };
-                s.set_secret(&id, &key);
+                let key = sanitize_api_key(&raw, cf)?;
+                s.try_set_secret(&id, &key)
             });
-            changed("config");
-            json!(true)
+            match res {
+                Ok(()) => {
+                    changed("config");
+                    json!({ "ok": true })
+                }
+                Err(e) => json!({ "ok": false, "error": e }),
+            }
         }
         "provider:test" => hub::test(arg(0).as_str().unwrap_or("")).await,
         "provider:presets" => presets::presets(),
         "provider:models" => provider_models(arg(0).as_str().unwrap_or("")).await,
         "provider:list" => {
             let a = arg(0);
-            let s = |k: &str| a[k].as_str().unwrap_or("").to_string();
-            list_models(&s("baseUrl"), &s("key"), s("type") == "anthropic", a["free"] == json!(true)).await
+            let s_field = |k: &str| a[k].as_str().unwrap_or("").to_string();
+            let base_url = s_field("baseUrl");
+            let mut key = s_field("key");
+            if key.is_empty() {
+                if let Some(id) = a["id"].as_str().filter(|id| !id.is_empty()) {
+                    let norm = |u: &str| u.trim().trim_end_matches('/').to_string();
+                    key = with_store(|st| {
+                        st.provider(id)
+                            .filter(|p| norm(p["baseUrl"].as_str().unwrap_or("")) == norm(&base_url))
+                            .map(|_| st.get_secret(id))
+                            .unwrap_or_default()
+                    });
+                }
+            }
+            list_models(&base_url, &key, s_field("type") == "anthropic", a["free"] == json!(true)).await
         }
         "keys:capture" => {
             if arg(0) == json!(true) {
@@ -340,9 +354,15 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
                 .collect::<Vec<_>>())
         }),
         "secrets:import" => {
-            with_store(|s| s.set_secret(arg(0).as_str().unwrap_or(""), arg(1).as_str().unwrap_or("")));
-            changed("config");
-            json!(true)
+            let id = arg(0).as_str().unwrap_or("").to_string();
+            let val = arg(1).as_str().unwrap_or("").to_string();
+            match with_store(|s| s.try_set_secret(&id, &val)) {
+                Ok(()) => {
+                    changed("config");
+                    json!({ "ok": true })
+                }
+                Err(e) => json!({ "ok": false, "error": e }),
+            }
         }
         "dev:seed" if std::env::var("MURMINT_DEV").is_ok() => {
             let o = arg(0);
