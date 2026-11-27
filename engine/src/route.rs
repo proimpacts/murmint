@@ -33,7 +33,11 @@ pub fn candidates<'a>(store: &'a Store, task: &str) -> Vec<Cand<'a>> {
         if !store.provider_ready(id) || (local_only && !on_this_pc(p)) {
             continue;
         }
+        let removed = p["removedModels"].as_array();
         for m in p["models"].as_array().into_iter().flatten() {
+            if removed.is_some_and(|r| r.contains(&m["id"])) {
+                continue;
+            }
             if m["task"] == task {
                 out.push(Cand {
                     r: format!("{id}::{}", m["id"].as_str().unwrap_or("")),
@@ -355,9 +359,29 @@ mod tests {
     fn only_providers_on_this_pc_count_as_local() {
         assert!(on_this_pc(&json!({ "baseUrl": "http://localhost:11434/v1" })));
         assert!(on_this_pc(&json!({ "baseUrl": "http://127.0.0.1:1234/v1" })));
-        assert!(on_this_pc(&json!({ "baseUrl": "https://example.com", "local": true })));
+        assert!(on_this_pc(&json!({ "baseUrl": "http://[::1]:11434/v1" })));
+        assert!(on_this_pc(&json!({ "baseUrl": "::1" })));
+        assert!(on_this_pc(&json!({ "local": true })));
+        assert!(on_this_pc(&json!({ "id": "murmint-local" })));
+        assert!(!on_this_pc(&json!({ "baseUrl": "https://example.com", "local": true })));
+        assert!(!on_this_pc(&json!({ "type": "cloudflare", "baseUrl": "http://127.0.0.1:1234", "local": true })));
         assert!(!on_this_pc(&json!({ "baseUrl": "https://api.openai.com/v1" })));
         assert!(!on_this_pc(&json!({ "baseUrl": "https://localhost.evil.com/v1" })));
+    }
+
+    #[test]
+    fn removed_models_are_excluded_from_candidates_and_routing() {
+        let mut s = store_with(&["openai"]);
+        if let Some(ps) = s.config["providers"].as_array_mut() {
+            for p in ps {
+                if p["id"] == "openai" {
+                    p["removedModels"] = json!(["gpt-5.4-mini"]);
+                }
+            }
+        }
+        let chat = rank_chat(&s, 0, 300.0, 100.0);
+        assert!(!chat.iter().any(|r| r == "openai::gpt-5.4-mini"), "{chat:?}");
+        assert!(chat.iter().any(|r| r == "openai::gpt-5-mini"), "{chat:?}");
     }
 
     #[test]
