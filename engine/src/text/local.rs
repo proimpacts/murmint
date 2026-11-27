@@ -341,12 +341,36 @@ pub struct LocalOut {
     pub had_punct: bool,
 }
 
+fn is_auto_english(s: &str) -> bool {
+    let mut ascii_letters = 0usize;
+    let mut non_ascii_letters = 0usize;
+    for c in s.chars() {
+        if c.is_ascii() {
+            if c.is_ascii_alphabetic() {
+                ascii_letters += 1;
+            }
+        } else if matches!(c, '’' | '‘' | '“' | '”' | '—' | '–' | '…' | '\u{00A0}' | '\u{FE0F}' | '\u{200D}')
+            || ('\u{1F000}'..='\u{1FAFF}').contains(&c)
+            || ('\u{2600}'..='\u{27BF}').contains(&c)
+        {
+            // Common Unicode punctuation, emojis, and symbols are allowed in English text.
+        } else if ('\u{00C0}'..='\u{024F}').contains(&c) && c.is_alphabetic() {
+            non_ascii_letters += 1;
+        } else {
+            return false;
+        }
+    }
+    non_ascii_letters == 0 || ascii_letters > non_ascii_letters
+}
+
 pub fn local_format(raw: &str, o: &LocalOpts, personal: &Value) -> LocalOut {
-    let mut text = raw.trim().to_string();
+    let mut text = raw.trim().replace("\r\n", "\n").replace('\r', "\n");
     if text.is_empty() {
         return LocalOut { signals: analyze(""), ..Default::default() };
     }
     text = apply_personal(&text, personal);
+    let lang = o.language.trim().to_ascii_lowercase();
+    let english = lang.starts_with("en") || (lang == "auto" && is_auto_english(&text));
     let (mut commands, mut list_done) = (false, false);
     if o.spoken_commands && o.kind != "code" {
         let (t, used) = spoken_emoji(&text);
@@ -363,12 +387,11 @@ pub fn local_format(raw: &str, o: &LocalOpts, personal: &Value) -> LocalOut {
         text = dedupe(&text);
     }
     if o.self_correct {
+        text = text.replace("\r\n", "\n").replace('\r', "\n");
         let (t, used) = super::selfcorrect::apply(&text);
         text = t;
         commands = commands || used;
     }
-    let english = (o.language == "auto" || o.language.to_lowercase().starts_with("en"))
-        && text.chars().all(|c| (c as u32) < 128 || c == '…' || c == '—');
     text = tidy(&text, o.auto_capitalize && o.kind != "code", english);
     // lists are made everywhere except in code; requests to an AI and plain text fields get them too
     let structured = o.kind != "code";
@@ -455,5 +478,53 @@ mod emoji_tests {
         assert!(!spoken_emoji("hello there").1);
         let in_code = LocalOpts { kind: "code".into(), ..Default::default() };
         assert!(!local_format("hi smiley face", &in_code, &serde_json::json!({})).text.contains('🙂'));
+    }
+
+    #[test]
+    fn spoken_emoji_and_unicode_preserve_english_rules() {
+        let auto_gram = LocalOpts { grammar: true, ..Default::default() };
+        assert_eq!(
+            local_format("i cant wait for tuesday thumbs up emoji", &auto_gram, &serde_json::json!({})).text,
+            "I can't wait for Tuesday 👍"
+        );
+        assert_eq!(
+            local_format("i cant wait for tuesday thumbs up emoji today", &auto_gram, &serde_json::json!({})).text,
+            "I can't wait for Tuesday 👍 today."
+        );
+        assert_eq!(
+            local_format("i cant wait for tuesday at the café", &auto_gram, &serde_json::json!({})).text,
+            "I can't wait for Tuesday at the café."
+        );
+        assert_eq!(
+            local_format("i think it’s “great” on tuesday", &auto_gram, &serde_json::json!({})).text,
+            "I think it’s “great” on Tuesday."
+        );
+
+        let explicit_en = LocalOpts { language: "en-US".into(), grammar: true, ..Default::default() };
+        assert_eq!(
+            local_format("i cant wait for tuesday at the Café — thumbs up emoji", &explicit_en, &serde_json::json!({})).text,
+            "I can't wait for Tuesday at the Café — 👍"
+        );
+        assert_eq!(
+            local_format("i cant wait for tuesday at the Café", &explicit_en, &serde_json::json!({})).text,
+            "I can't wait for Tuesday at the Café."
+        );
+
+        assert_eq!(
+            local_format("привет i", &LocalOpts::default(), &serde_json::json!({})).text,
+            "привет i"
+        );
+        let fr = LocalOpts { language: "fr".into(), grammar: true, ..Default::default() };
+        assert_eq!(local_format("i cant", &fr, &serde_json::json!({})).text, "I cant");
+
+        let crlf_sc = LocalOpts { self_correct: true, auto_capitalize: false, ..Default::default() };
+        assert_eq!(
+            local_format("“hello”\r\nüber  car, I mean over car", &crlf_sc, &serde_json::json!({})).text,
+            "“hello”\nover car"
+        );
+        assert_eq!(
+            local_format("“hello”\rüber  car, I mean over car", &crlf_sc, &serde_json::json!({})).text,
+            "“hello”\nover car"
+        );
     }
 }
