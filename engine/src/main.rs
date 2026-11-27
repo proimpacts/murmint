@@ -390,7 +390,7 @@ async fn chat_once(
         for (k, v) in &params {
             body[*k] = v.clone();
         }
-        let mut req = CLIENT.post(format!("{base}/chat/completions")).json(&body).timeout(timeout);
+        let mut req = CLIENT.post(&url).json(&body).timeout(timeout);
         if !c.key.is_empty() {
             req = req.bearer_auth(&c.key);
         }
