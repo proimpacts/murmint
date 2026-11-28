@@ -82,7 +82,7 @@ The people who have built and improved Murmint. Pull requests are welcome; if on
 | Contributor | What they did |
 |---|---|
 | [proimpacts](https://github.com/proimpacts) | Created Murmint: design, direction, testing and most of the code |
-| [lilsnibbi](https://github.com/lilsnibbi) | [#1](https://github.com/proimpacts/murmint/pull/1): fixed bugs across privacy, dictation, text insertion, the clipboard, formatting, providers, the installer and data safety, and added automated tests |
+| [cooperhines](https://github.com/cooperhines) | [#1](https://github.com/proimpacts/murmint/pull/1): fixed bugs across privacy, dictation, text insertion, the clipboard, formatting, providers, the installer and data safety, and added automated tests |
 
 ## License
 
