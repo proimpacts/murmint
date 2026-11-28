@@ -15,7 +15,7 @@ Hold <kbd>Ctrl</kbd>+<kbd>Win</kbd>, say what you want to say, let go. Murmint t
 
 <img src="docs/images/demo.gif" alt="Saying a message out loud and Murmint typing a clean version into a chat" width="100%">
 
-Speech runs free on your own PC with Murmint 1, Murmint's own speech model. For formatting it works with whichever AI you already pay for (OpenAI, Claude, Groq, Cloudflare, Gemini, OpenRouter and others), picked automatically or by price, or a model running on your own PC.
+Speech runs free on your own PC with Murmint's own speech models: Murmint 1, or Murmint Edge if you want it faster and better with accents. You pick which to download when you set up, and can delete either later. For formatting it works with whichever AI you already pay for (OpenAI, Claude, Groq, Cloudflare, Gemini, OpenRouter and others), picked automatically or by price, or a model running on your own PC.
 
 ## A look around
 
@@ -72,6 +72,7 @@ These are the models Murmint makes itself. For formatting, and for speech if you
 | Model | What it does | Status |
 |---|---|---|
 | **Murmint 1** | Turns your voice into text on your own PC. Free, private and works offline. Built on OpenAI's [Whisper](https://github.com/openai/whisper) Tiny, run by [whisper.cpp](https://github.com/ggml-org/whisper.cpp). | The default speech model |
+| **Murmint Edge** | A faster speech model that handles accents and different pronunciations better. Free, private and works offline, in English, Chinese, Japanese, Korean and Cantonese. Built on [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) Small, run by [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). | New, optional download |
 
 ## Contributors
 
