@@ -269,3 +269,6 @@ html.electron .dragbar, html.electron .brand { -webkit-app-region: drag; }
 /* things just built or recoloured show their final look straight away (see App._quiet) */
 :root .no-trans *, :root .no-trans *::before, :root .no-trans *::after, :root.no-trans *, :root.no-trans *::before, :root.no-trans *::after { transition: none !important; }
 :root .no-trans .switch, :root .no-trans .switch::after, :root.no-trans .switch, :root.no-trans .switch::after { transition: none !important; }
+
+.vocab-chips { padding: 16px; gap: 8px; }
+.vocab-chips .chip.learned { background: var(--accent-soft); color: var(--accent-text); }

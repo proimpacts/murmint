@@ -162,6 +162,12 @@ mod clip {
     pub fn write_text_private(text: &str) -> bool {
         write(text, true)
     }
+    /// The Copy buttons (on the pill, History, Home): a real copy, so it shows in Better Clipboard like any other.
+    pub fn write_text_copy(text: &str) -> bool {
+        let ok = write(text, false);
+        crate::clipboard::allow_capture();
+        ok
+    }
 
     fn write(text: &str, private: bool) -> bool {
         if !open() {
@@ -226,12 +232,16 @@ mod clip {
     pub fn write_text_private(_: &str) -> bool {
         true
     }
+    pub fn write_text_copy(_: &str) -> bool {
+        true
+    }
     pub fn read_text() -> Option<String> {
         None
     }
 }
 
 pub use clip::write_text as write_clipboard_text;
+pub use clip::write_text_copy as copy_to_clipboard;
 
 #[cfg(test)]
 pub static TEST_SINK: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);

@@ -8,6 +8,48 @@
     [2, 'Balanced', 'Also tightens clumsy sentences and adds structure, paragraphs, lists, when your words call for it.'],
     [3, 'Strong', 'Rewrites freely for clarity and the chosen style while keeping every fact.'],
   ];
+  const PROMPTING = [
+    [1, 'Light', 'Tidies the wording and keeps it as plain sentences. Never turns it into a list.'],
+    [2, 'Balanced', 'Plain sentences for questions and short requests; numbered steps only when you ask for several things.'],
+    [3, 'Full', 'Turns every task into a structured prompt: the goal, numbered steps, context and what not to change.'],
+  ];
+
+  // A stepped slider: drag or click a stop, arrow keys move one step. stops is [[value, label, description], ...].
+  function scaleSlider(stops, value, set) {
+    const lo = stops[0][0], hi = stops[stops.length - 1][0], span = hi - lo;
+    const scale = h('div', { class: 'scale' },
+      h('div', { class: 'scale-track' }, h('div', { class: 'scale-fill' }), h('div', { class: 'scale-knob' })),
+      h('div', { class: 'scale-stops' }, ...stops.map(([v, l]) => {
+        const b = h('button', { class: `scale-stop${value === v ? ' on' : ''}`, type: 'button' }, l);
+        b.addEventListener('click', () => set(v));
+        return b;
+      })));
+    scale.lastChild.style.gridTemplateColumns = `repeat(${stops.length}, 1fr)`;
+    // the CSS places the knob on a 0 to 3 scale
+    const pos = (v) => ((v - lo) / span) * 3;
+    scale.style.setProperty('--pos', pos(value));
+    const track = scale.querySelector('.scale-track');
+    track.tabIndex = 0;
+    track.setAttribute('role', 'slider');
+    track.setAttribute('aria-valuemin', String(lo)); track.setAttribute('aria-valuemax', String(hi)); track.setAttribute('aria-valuenow', String(value));
+    const valueAt = (x) => { const r = track.getBoundingClientRect(); return lo + Math.min(1, Math.max(0, (x - r.left) / r.width)) * span; };
+    const commit = (v) => { const n = Math.round(v); scale.classList.remove('dragging'); scale.style.setProperty('--pos', pos(n)); if (n !== value) set(n); };
+    track.addEventListener('pointerdown', (e) => {
+      track.setPointerCapture(e.pointerId);
+      scale.classList.add('dragging');
+      scale.style.setProperty('--pos', pos(valueAt(e.clientX)));
+      const move = (ev) => scale.style.setProperty('--pos', pos(valueAt(ev.clientX)));
+      const up = (ev) => { track.removeEventListener('pointermove', move); track.removeEventListener('pointerup', up); commit(valueAt(ev.clientX)); };
+      track.addEventListener('pointermove', move);
+      track.addEventListener('pointerup', up);
+    });
+    track.addEventListener('keydown', (e) => {
+      const d = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 }[e.key];
+      if (d) { e.preventDefault(); commit(Math.min(hi, Math.max(lo, value + d))); }
+    });
+    return scale;
+  }
+
   function styleRow(cfg, st) {
     const active = st.id === cfg.formatting.style;
     const save = UI.debounce((v) => { App.set('styles', App.cfg().styles.map((x) => (x.id === st.id ? { ...x, instruction: v } : x))); });
@@ -94,35 +136,15 @@
       root.append(UI.section('Rules', 'Your own instructions, followed every time.', ruleList));
 
       // intensity
-      const scale = h('div', { class: 'scale' },
-        h('div', { class: 'scale-track' }, h('div', { class: 'scale-fill' }), h('div', { class: 'scale-knob' })),
-        h('div', { class: 'scale-stops' }, ...INTENSITY.map(([v, l]) => {
-          const b = h('button', { class: `scale-stop${f.intensity === v ? ' on' : ''}`, type: 'button' }, l);
-          b.addEventListener('click', () => App.set('formatting.intensity', v, { render: true }));
-          return b;
-        })));
-      scale.style.setProperty('--pos', f.intensity);
-      const track = scale.querySelector('.scale-track');
-      track.tabIndex = 0;
-      track.setAttribute('role', 'slider');
-      track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '3'); track.setAttribute('aria-valuenow', String(f.intensity));
-      const posAt = (x) => { const r = track.getBoundingClientRect(); return Math.min(3, Math.max(0, ((x - r.left) / r.width) * 3)); };
-      const commit = (v) => { const n = Math.round(v); scale.classList.remove('dragging'); scale.style.setProperty('--pos', n); if (n !== f.intensity) App.set('formatting.intensity', n, { render: true }); };
-      track.addEventListener('pointerdown', (e) => {
-        track.setPointerCapture(e.pointerId);
-        scale.classList.add('dragging');
-        scale.style.setProperty('--pos', posAt(e.clientX));
-        const move = (ev) => scale.style.setProperty('--pos', posAt(ev.clientX));
-        const up = (ev) => { track.removeEventListener('pointermove', move); track.removeEventListener('pointerup', up); commit(posAt(ev.clientX)); };
-        track.addEventListener('pointermove', move);
-        track.addEventListener('pointerup', up);
-      });
-      track.addEventListener('keydown', (e) => {
-        const d = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 }[e.key];
-        if (d) { e.preventDefault(); commit(Math.min(3, Math.max(0, f.intensity + d))); }
-      });
       const cur = INTENSITY[f.intensity] || INTENSITY[1];
-      root.append(UI.section('How much to rewrite', null, h('div', { class: 'card pad' }, scale, h('p', { class: 'scale-desc' }, cur[2]))));
+      root.append(UI.section('How much to rewrite', null, h('div', { class: 'card pad' },
+        scaleSlider(INTENSITY, f.intensity, (n) => App.set('formatting.intensity', n, { render: true })), h('p', { class: 'scale-desc' }, cur[2]))));
+      if (f.betterPrompts !== false) {
+        const level = f.betterPromptsLevel || 2;
+        root.append(UI.section('How much to improve prompts', 'For text going to an AI, with Better prompts on.', h('div', { class: 'card pad' },
+          scaleSlider(PROMPTING, level, (n) => App.set('formatting.betterPromptsLevel', n, { render: true })),
+          h('p', { class: 'scale-desc' }, (PROMPTING.find(([v]) => v === level) || PROMPTING[1])[2]))));
+      }
 
       // switches
       const opt = (ic, title, desc, ctl) => h('div', { class: 'opt' }, h('span', { class: 'opt-ic' }, icon(ic)), h('div', { class: 'grow' }, h('div', { class: 't' }, title), desc ? h('div', { class: 'd' }, desc) : ''), ctl);

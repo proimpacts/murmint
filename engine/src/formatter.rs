@@ -284,6 +284,8 @@ fn compose(cfg: &Value, ctx: &Context, vocabulary: &[String], wants_list: bool, 
     // rewritten prompts drift further from the input; loosen the checks
     let better = cfg["formatting"]["betterPrompts"] != json!(false)
         && crate::prompt::is_ai_prompt(&ctx.kind, app_name);
+    // how much Better prompts reshapes the text: 1 light, 2 balanced (default), 3 full
+    let better_level = if better { fmt["betterPromptsLevel"].as_u64().unwrap_or(2).clamp(1, 3) as u8 } else { 0 };
     // an app adds its own rules after the ones from Writing, or can be set to use only its own
     let app = ctx.profile_id.as_ref().map(|id| &cfg["appOverrides"][id]).unwrap_or(&Value::Null);
     let rules = if app["overrideRules"] == json!(true) {
@@ -304,7 +306,7 @@ fn compose(cfg: &Value, ctx: &Context, vocabulary: &[String], wants_list: bool, 
         humanize: fmt["humanize"].as_str().unwrap_or("off"),
         wants_list,
         has_context,
-        better_prompts: better,
+        better_level,
         auto_detect: auto_layout(fmt, ctx),
     });
     // Advanced prompting: the end of the person's coding-agent chat, so the prompt can name what they mean
@@ -327,7 +329,12 @@ ADVANCED PROMPTING: below is the end of the speaker's recent chat with their AI 
         examples.push(crate::prompt::layout_shot());
     }
     if better {
-        examples.push(crate::prompt::better_shot());
+        // light never restructures, so it only gets the question example
+        if better_level >= 2 {
+            examples.push(crate::prompt::better_shot());
+            examples.push(crate::prompt::better_shot_context());
+        }
+        examples.push(crate::prompt::better_shot_question());
     }
     Request { system, examples, better, rules, has_instruction: !instruction.trim().is_empty() }
 }
@@ -404,9 +411,11 @@ pub async fn format(raw: &str, ctx: &Context, local_only: bool) -> FormatOut {
         cleaned.text.clone()
     };
     let excluded = strings(&fmt["excludedChars"]);
-    let Request { system, examples, better, rules, has_instruction } =
+    let Request { system, mut examples, better, rules, has_instruction } =
         compose(&cfg, ctx, &vocabulary, wants_list, !before.is_empty());
-    let user = wrap_user_ctx(&body, before);
+    // the detailed rules and examples this transcript needs go with it, so the system prompt stays short and cacheable
+    examples.extend(crate::prompt::extra_shots(&body));
+    let user = crate::prompt::wrap_user_notes(&body, before, &crate::prompt::notes(&body));
     let tin = estimate_tokens(&system)
         + estimate_tokens(&user)
         + examples.iter().map(|(u, a)| estimate_tokens(u) + estimate_tokens(a)).sum::<u64>();

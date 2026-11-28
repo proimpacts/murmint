@@ -10,6 +10,7 @@ mod hub;
 mod insertion;
 mod ipc;
 mod learn;
+mod edge;
 mod murmint1;
 mod native;
 mod presets;
@@ -222,6 +223,9 @@ async fn stt_once(
     let lang = language.filter(|l| {
         (2..=3).contains(&l.len()) && *l != "auto" && l.chars().all(|ch| ch.is_ascii_alphabetic())
     });
+    if c.reference.starts_with("murmint-edge::") {
+        return edge::transcribe(wav, lang).await.map_err(|message| PErr { message, kind: "error" });
+    }
     if c.ptype == "cloudflare" {
         let url = format!("{}/run/{}", cf_base(&c.account_id), c.model);
         check_local_only(&url)?;
@@ -731,6 +735,7 @@ async fn main() {
                         native::start_hotkeys(session::on_hotkey_event);
                         clipboard::start(|ch, v| core::push(ch, "shell", v));
                         tokio::spawn(murmint1::boot());
+                        tokio::spawn(edge::list());
                         static UPDATES: std::sync::Once = std::sync::Once::new();
                         UPDATES.call_once(updater::start);
                         core::apply_hotkeys();

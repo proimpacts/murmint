@@ -15,11 +15,34 @@ const HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/uninstall.html"));
 fn main() {
     // can't delete our own folder, so relaunch from temp
     let args: Vec<String> = std::env::args().collect();
+    // The NSIS installer runs the registered uninstaller itself when it updates or reinstalls Murmint, silently and
+    // from a copy in its own temp folder ("/S ... _?=<install folder>"). That is not someone uninstalling: hand it to
+    // the regular NSIS uninstaller with the same arguments and show nothing.
+    if args.iter().any(|a| a == "/S") {
+        let dir = args.iter().find_map(|a| a.strip_prefix("_?=")).map(PathBuf::from);
+        if let Some(regular) = dir.map(|d| d.join("Uninstall Murmint.exe")).filter(|r| r.is_file()) {
+            // a running Murmint holds its files open and makes the NSIS uninstaller give up
+            for exe in ["Murmint.exe", "murmint-engine.exe"] {
+                let _ = Command::new("taskkill").args(["/F", "/T", "/IM", exe]).creation_flags(NO_WINDOW).status();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let mut cmd = Command::new(regular);
+            for a in &args[1..] {
+                cmd.raw_arg(a);
+            }
+            // The new version is copied over the old files straight after this, so a partial clean-up is fine.
+            // Reporting a failure here would stop the update ("Failed to uninstall old application files").
+            let _ = cmd.creation_flags(NO_WINDOW).status();
+        }
+        std::process::exit(0);
+    }
     let dir = match args.iter().position(|a| a == "--from").and_then(|i| args.get(i + 1)) {
         Some(d) => PathBuf::from(d),
         None => {
             let Ok(me) = std::env::current_exe() else { return };
-            let dir = me.parent().map(Path::to_path_buf).unwrap_or_default();
+            let here = me.parent().map(Path::to_path_buf).unwrap_or_default();
+            // started from somewhere that isn't the install folder (a temp copy): find where Murmint really is
+            let Some(dir) = install_dir(&here) else { return };
             let copy = std::env::temp_dir().join("murmint-uninstall.exe");
             if std::fs::copy(&me, &copy).is_ok() {
                 let _ = Command::new(&copy).arg("--from").arg(&dir).spawn();
@@ -101,24 +124,52 @@ fn uninstall(dir: &Path, wipe: bool, p: &EventLoopProxy<Ev>) -> Result<(), Strin
         }
     }
     say(80.0, "Tidying up");
-    clean_install_dir(dir)?;
+    // never tidy a folder that isn't Murmint's
+    if is_install_dir(dir) {
+        clean_install_dir(dir)?;
+    }
     restore_windows_clipboard();
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        // the downloaded models and the sign-in go with the app, so a reinstall signs in again;
-        // settings and history only when asked
-        let data = Path::new(&appdata).join("Murmint");
-        let _ = std::fs::remove_file(data.join("data").join("account.bin"));
-        forget_sign_in(&data.join("data").join("secrets.json"));
-        let target = if wipe { data } else { data.join("models") };
-        if target.exists() {
-            std::fs::remove_dir_all(&target)
-                .map_err(|e| format!("Could not remove {}: {e}", target.display()))?;
+    // Everything Murmint saved (settings, history, vocabulary, keys, the sign-in and downloaded models) stays for a
+    // reinstall, unless "Also delete my data" was chosen.
+    if wipe {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let data = Path::new(&appdata).join("Murmint");
+            if data.exists() {
+                std::fs::remove_dir_all(&data).map_err(|e| format!("Could not remove {}: {e}", data.display()))?;
+            }
         }
     }
     if wipe {
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("murmint-setup-webview"));
     }
     Ok(())
+}
+
+fn is_install_dir(dir: &Path) -> bool {
+    dir.join("Murmint.exe").is_file() || dir.join(".murmint-install.json").is_file()
+}
+
+/// The folder Murmint is installed in: where this uninstaller sits, else the one Installed apps knows, else the default.
+fn install_dir(here: &Path) -> Option<PathBuf> {
+    if is_install_dir(here) {
+        return Some(here.to_path_buf());
+    }
+    let out = Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall", "/s", "/v", "InstallLocation"])
+        .creation_flags(NO_WINDOW)
+        .output()
+        .ok();
+    let from_registry = out.and_then(|o| {
+        String::from_utf8_lossy(&o.stdout).lines().find_map(|l| {
+            let path = l.trim().strip_prefix("InstallLocation")?.trim_start().strip_prefix("REG_SZ")?.trim();
+            let p = PathBuf::from(path.trim_matches('"'));
+            is_install_dir(&p).then_some(p)
+        })
+    });
+    from_registry.or_else(|| {
+        let p = PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("Programs").join("Murmint");
+        is_install_dir(&p).then_some(p)
+    })
 }
 
 fn is_single_entry_name(name: &str) -> bool {
@@ -245,15 +296,6 @@ fn restore_windows_clipboard() {
         .creation_flags(NO_WINDOW)
         .status();
     let _ = Command::new("reg").args(["delete", r"HKCU\Software\Murmint", "/v", "ClipboardHistoryWas", "/f"]).creation_flags(NO_WINDOW).status();
-}
-
-// the engine keeps the sign-in with the provider keys; only the sign-in goes, the keys stay with the settings
-fn forget_sign_in(secrets: &Path) {
-    let Ok(text) = std::fs::read_to_string(secrets) else { return };
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
-    if v.as_object_mut().and_then(|m| m.remove("murmint-account")).is_some() {
-        let _ = std::fs::write(secrets, v.to_string());
-    }
 }
 
 fn remove_self_later() {

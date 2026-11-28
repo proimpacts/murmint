@@ -212,7 +212,7 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
         "history:query" => with_store(|s| query_history(&s.history, &arg(0))),
         "clipboard:write" => {
             let t = arg(0).as_str().unwrap_or("").to_string();
-            let ok = tokio::task::spawn_blocking(move || insertion::write_clipboard_text(&t))
+            let ok = tokio::task::spawn_blocking(move || insertion::copy_to_clipboard(&t))
                 .await
                 .unwrap_or(false);
             json!(ok)
@@ -221,6 +221,7 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
             crate::native::raise_under_taskbar(arg(0).as_i64().unwrap_or(0) as isize);
             json!({})
         }
+        "overlay:fullscreen" => json!(crate::native::foreground_full_screen(arg(0).as_i64().unwrap_or(0) as isize)),
         "app:trim" => {
             let pids: Vec<u32> = arg(0)
                 .as_array()
@@ -349,6 +350,14 @@ pub async fn ui(ch: &str, a: &[Value]) -> Value {
             native::handle("native_paste", &json!({})).await;
             json!(true)
         }
+        "local:status" if arg(0) == "edge" => crate::edge::status(),
+        "local:download" if arg(0) == "edge" => crate::edge::download(),
+        "local:cancel" if arg(0) == "edge" => {
+            crate::edge::cancel();
+            json!({})
+        }
+        "local:remove" if arg(0) == "edge" => crate::edge::remove().await,
+        "local:remove" => crate::murmint1::remove().await,
         "local:status" => crate::murmint1::status(),
         "local:download" => crate::murmint1::download(),
         "local:cancel" => {

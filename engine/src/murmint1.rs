@@ -61,7 +61,7 @@ fn whisper_files() -> Vec<String> {
         .collect()
 }
 
-fn root() -> PathBuf {
+pub(crate) fn root() -> PathBuf {
     let dir = core::get().store.lock().unwrap().dir.clone();
     dir.parent().unwrap_or(&dir).join("models")
 }
@@ -100,7 +100,7 @@ pub fn installed() -> bool {
 }
 
 #[cfg(windows)]
-fn free_space(dir: &Path) -> Option<u64> {
+pub(crate) fn free_space(dir: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let _ = std::fs::create_dir_all(dir);
@@ -110,7 +110,7 @@ fn free_space(dir: &Path) -> Option<u64> {
     Some(avail)
 }
 #[cfg(not(windows))]
-fn free_space(_: &Path) -> Option<u64> {
+pub(crate) fn free_space(_: &Path) -> Option<u64> {
     None
 }
 
@@ -137,7 +137,7 @@ fn dl_cancelled(gen: u64) -> bool {
 fn status_of(p: &Progress) -> Value {
     let installed = installed();
     let state = if DOWNLOADING.load(Ordering::SeqCst) { "downloading" } else if installed { "installed" } else { p.state };
-    json!({ "state": state, "received": p.received, "total": TOTAL, "error": p.error, "checking": p.checking,
+    json!({ "model": "m1", "state": state, "received": p.received, "total": TOTAL, "error": p.error, "checking": p.checking,
             "installed": installed, "running": running(), "size": TOTAL })
 }
 
@@ -158,7 +158,7 @@ fn report(change: impl FnOnce(&mut Progress)) {
     }
 }
 
-fn gb(n: u64) -> String {
+pub(crate) fn gb(n: u64) -> String {
     format!("{:.1} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
@@ -258,6 +258,43 @@ pub fn cancel() {
             p.checking = false;
         }
     });
+}
+
+/// Deletes Murmint 1 from this computer and takes it out of Models. Speech moves to the first backup, or to
+/// Murmint Edge when that is downloaded.
+pub async fn remove() -> Value {
+    cancel();
+    stop();
+    let me = format!("{PROVIDER}::");
+    let stt = core::get().store.lock().unwrap().config["models"]["stt"].clone();
+    let mut rest: Vec<Value> =
+        stt["fallbacks"].as_array().into_iter().flatten().filter(|r| !r.as_str().is_some_and(|r| r.starts_with(&me))).cloned().collect();
+    let primary = if stt["primary"].as_str().is_some_and(|r| r.starts_with(&me)) {
+        if !rest.is_empty() {
+            rest.remove(0)
+        } else if crate::edge::installed() {
+            json!(format!("{}::{}", crate::edge::PROVIDER, crate::edge::STT_MODEL))
+        } else {
+            json!("")
+        }
+    } else {
+        stt["primary"].clone()
+    };
+    ui("config:set", &[json!("models.stt.primary"), primary]).await;
+    ui("config:set", &[json!("models.stt.fallbacks"), json!(rest)]).await;
+    ui("provider:remove", &[json!(PROVIDER)]).await;
+    let dir = root();
+    let _ = std::fs::remove_dir_all(dir.join("whisper"));
+    for p in &PARTS {
+        let _ = std::fs::remove_file(dir.join(format!("{}.ok", p.id)));
+    }
+    let _ = std::fs::remove_file(dir.join(MODEL_FILE));
+    report(|p| {
+        p.state = "none";
+        p.received = 0;
+        p.error = None;
+    });
+    status()
 }
 
 async fn after_download() {
@@ -377,7 +414,7 @@ async fn fetch_to(p: &Part, file: &Path, base: u64, my_gen: u64) -> Result<(), S
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> Option<String> {
+pub(crate) fn sha256_file(path: &Path) -> Option<String> {
     let mut f = std::fs::File::open(path).ok()?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
@@ -400,7 +437,7 @@ fn unzip(zip: &Path, dest: &Path) -> Option<()> {
     cmd.status().ok()?.success().then_some(())
 }
 
-fn no_window(cmd: &mut std::process::Command) {
+pub(crate) fn no_window(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

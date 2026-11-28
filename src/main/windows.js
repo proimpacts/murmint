@@ -95,7 +95,7 @@ class Windows {
         if (this.overlay === o && !o.isDestroyed()) o.webContents.send(ch, payload);
       }
     });
-    o.on('hide', () => { setTimeout(() => { const cur = this.overlay; if (this.overlayShown && cur && !cur.isDestroyed() && !cur.isVisible()) cur.showInactive(); }, 250); });
+    o.on('hide', () => { setTimeout(() => { const cur = this.overlay; if (this.overlayShown && cur && !cur.isDestroyed() && !cur.isVisible()) this._reshow(cur); }, 250); });
     o.webContents.on('render-process-gone', (_e, d) => {
       console.log('[overlay] page gone:', d && d.reason);
       this.onOverlayLost?.();
@@ -119,7 +119,14 @@ class Windows {
       const { powerMonitor } = require('electron');
       for (const ev of ['resume', 'unlock-screen', 'user-did-become-active']) powerMonitor.on(ev, () => setTimeout(() => { refit(); }, 800));
       setInterval(() => this._repaintOverlay(), 20000).unref?.();
-      setInterval(() => { const o = this.overlay; if (this.overlayShown && o && !o.isDestroyed()) { if (!o.isVisible()) o.showInactive(); this._raiseOverlay(); } }, 2000).unref?.();
+      setInterval(() => { const o = this.overlay; if (this.overlayShown && o && !o.isDestroyed()) { if (!o.isVisible()) this._reshow(o); this._raiseOverlay(); } }, 2000).unref?.();
+      // step out of the way while a video is full screen (YouTube, Netflix, a video player), and come back after
+      setInterval(async () => {
+        const o = this.overlay;
+        if (!o || o.isDestroyed() || !this.onFullScreen) return;
+        const full = await this.onFullScreen(Number(o.getNativeWindowHandle().readBigUInt64LE(0)));
+        if (full !== !!this.fullScreen) { this.fullScreen = full; this._fadeForVideo(); }
+      }, 1000).unref?.();
     }
     return this.overlay;
   }
@@ -129,7 +136,7 @@ class Windows {
     if (!o || o.isDestroyed()) { this._rebuildOverlay(); return; }
     if (o.webContents.isCrashed()) { this._rebuildOverlay(); return; }
     if (this.overlayShown) {
-      if (!o.isVisible()) o.showInactive();
+      if (!o.isVisible()) this._reshow(o);
       // redraw only; raising here would cover the Start menu
       o.webContents.invalidate();
     }
@@ -211,16 +218,38 @@ class Windows {
 
   syncOverlay(active = false) {
     if (!this.overlay) return;
+    this.active = active;
     const keep = this.store.config.appearance.pillIdle !== false || this.pinned;
     if (keep || active) this.showOverlay(); else this.hideOverlay();
+    this._fadeForVideo();
+  }
+
+  // During a full-screen video the pill turns invisible and lets every click through, instead of hiding: hiding and
+  // showing the window again is what broke hovering and dragging afterwards. It comes back while you dictate.
+  _fadeForVideo() {
+    const o = this.overlay;
+    if (!o || o.isDestroyed() || this.drag) return;
+    const away = !!this.fullScreen && !this.active;
+    if (away === !!this._faded) return;
+    this._faded = away;
+    o.setOpacity(away ? 0 : 1);
+    if (away) o.setIgnoreMouseEvents(true); else o.setIgnoreMouseEvents(true, { forward: true });
   }
 
   showOverlay() {
     if (!this.overlay) return;
     if (!this.overlayShown) this.positionOverlay();
-    this.overlay.showInactive();
+    this._reshow(this.overlay);
     this._raiseOverlay();
     this.overlayShown = true;
+  }
+
+  // After a hide, Windows stops passing mouse moves through to the page, so hovering, clicking and dragging the pill
+  // (and its Copy and Dismiss buttons) stop working until click-through is set again.
+  _reshow(o) {
+    o.showInactive();
+    // switching click-through off and on again makes Windows start forwarding mouse moves to the page once more
+    if (!this.drag && !this._faded) { o.setIgnoreMouseEvents(false); o.setIgnoreMouseEvents(true, { forward: true }); }
   }
 
   // Last raised topmost window wins, so re-assert on show and every 2s. The engine raises the pill over other

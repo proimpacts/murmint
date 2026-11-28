@@ -21,6 +21,11 @@ pub fn mark_own() {
     OWN.store(win::sequence(), Ordering::Relaxed);
 }
 
+// undo suppress_capture for a copy the user asked for
+pub fn allow_capture() {
+    SUPPRESS_UNTIL.store(0, Ordering::SeqCst);
+}
+
 pub fn suppress_capture(ms: u64) {
     let until = now_ms().saturating_add(ms);
     SUPPRESS_UNTIL.fetch_max(until, Ordering::SeqCst);

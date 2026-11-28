@@ -25,17 +25,24 @@
       const app = document.getElementById('app');
       app.hidden = true; root.hidden = false;
 
-      let user = info.user, local = info.local;
+      let user = info.user, local = info.local, edge = info.edge || { installed: false, size: 0 };
+      // which speech models to download; Murmint 1 is ticked to start with
+      const want = { m1: true, edge: false };
+      let started = local.installed || edge.installed || local.state === 'downloading' || edge.state === 'downloading';
       const saved = App.cfg().onboarding || {};
       let heard = saved.heardFrom || '';
       let signing = null, keyIndex = 0;
 
       const steps = ['signin', 'heard', 'speech', 'keys'];
-      let step = !user ? 'signin' : !heard ? 'heard' : !local.installed ? 'speech' : 'keys';
+      let step = !user ? 'signin' : !heard ? 'heard' : !(local.installed || edge.installed) ? 'speech' : 'keys';
 
       const offs = [
         api.on('state:changed', (st) => { App.S = st; }),
-        api.on('local:progress', (p) => { local = { ...local, ...p, installed: p.state === 'installed' || local.installed }; if (step === 'speech') draw(); }),
+        api.on('local:progress', (p) => {
+          if (p.model === 'edge') edge = { ...edge, ...p, installed: p.state === 'installed' || (edge.installed && p.state !== 'none') };
+          else local = { ...local, ...p, installed: p.state === 'installed' || (local.installed && p.state !== 'none') };
+          if (step === 'speech') draw();
+        }),
       ];
       const go = (to) => { recorder.stop(); step = to; draw(); };
       const next = () => go(steps[steps.indexOf(step) + 1]);
@@ -142,22 +149,32 @@
         },
 
         speech() {
-          if (!local.installed && local.state !== 'downloading' && local.state !== 'error') {
-            api.downloadModels().then((st) => { local = { ...local, ...st }; draw(); });
-            local = { ...local, state: 'downloading' };
+          const MODELS = [
+            ['m1', 'Murmint 1', 'Works well for most people. Small download.', () => local, (v) => { local = v; }, undefined],
+            ['edge', 'Murmint Edge', 'Faster and better with accents. English, Chinese, Japanese, Korean and Cantonese.', () => edge, (v) => { edge = v; }, 'edge'],
+          ];
+          if (!started) {
+            const rows = MODELS.map(([id, name, desc, st]) => {
+              const box = h('input', { type: 'checkbox', checked: want[id], on: { change: (e) => { want[id] = e.target.checked; draw(); } } });
+              return h('label', { class: 'onb-model' + (want[id] ? ' on' : '') }, box,
+                h('div', { class: 'grow' }, h('b', null, name), h('span', null, desc)), h('span', { class: 'muted tnum' }, size(st().size || 0)));
+            });
+            return [head('Choose your speech models', 'They run on this computer, so turning your voice into text is free and private. You can download or delete them later under Models.'),
+              h('div', { class: 'onb-models' }, ...rows)];
           }
-          const pct = local.total ? Math.min(100, Math.round(((local.received || 0) / local.total) * 100)) : 0;
-          let status;
-          if (local.installed) status = h('div', { class: 'onb-wait good' }, window.icon('check'), 'Murmint 1 is ready');
-          else if (local.state === 'error') {
-            status = h('div', { class: 'onb-progress' }, h('div', { class: 'onb-err' }, local.error),
-              h('div', { class: 'flex', style: { justifyContent: 'center' } }, UI.btn('Try again', { variant: 'primary', onClick: async () => { local = { ...local, ...(await api.downloadModels()) }; draw(); } })));
-          } else {
-            status = h('div', { class: 'onb-progress' },
+          const lines = MODELS.filter(([id, , , st]) => want[id] || st().installed || st().state === 'downloading').map(([id, name, , st, set, key]) => {
+            const m = st();
+            if (m.installed) return h('div', { class: 'onb-wait good' }, window.icon('check'), `${name} is ready`);
+            if (m.state === 'error') {
+              return h('div', { class: 'onb-progress' }, h('div', { class: 'onb-err' }, `${name}: ${m.error}`),
+                h('div', { class: 'flex', style: { justifyContent: 'center' } }, UI.btn('Try again', { variant: 'primary', onClick: async () => { set({ ...st(), ...(await api.downloadModels(key)) }); draw(); } })));
+            }
+            const pct = m.total ? Math.min(100, Math.round(((m.received || 0) / m.total) * 100)) : 0;
+            return h('div', { class: 'onb-progress' }, h('b', { class: 'onb-model-name' }, name),
               h('div', { class: 'onb-bar' }, h('i', { style: { width: pct + '%' } })),
-              h('div', { class: 'onb-dl-meta' }, h('span', null, local.checking ? 'Checking the download…' : `${size(local.received || 0)} of ${size(local.size || local.total)}`), h('span', null, pct + '%')));
-          }
-          return [head('Getting Murmint 1', 'Murmint’s own speech model runs on this computer, so turning your voice into text is free and private.'), status];
+              h('div', { class: 'onb-dl-meta' }, h('span', null, m.checking ? 'Checking the download…' : `${size(m.received || 0)} of ${size(m.size || m.total)}`), h('span', null, pct + '%')));
+          });
+          return [head('Getting your speech models', 'This only happens once. You can keep going while they finish.'), ...lines];
         },
 
         keys() {
@@ -176,12 +193,20 @@
       function canContinue() {
         if (step === 'signin') return !!user;
         if (step === 'heard') return !!heard;
-        if (step === 'speech') return !!local.installed;
+        if (step === 'speech') return started ? (!want.m1 || local.installed) && (!want.edge || edge.installed) : want.m1 || want.edge;
         return true;
       }
 
       async function onContinue(btn) {
         if (step === 'keys' && keyIndex < KEYS.length - 1) { recorder.stop(); keyIndex++; draw(); return; }
+        if (step === 'speech' && !started) {
+          // start the downloads that were ticked; Continue waits for them, Skip doesn't
+          started = true;
+          if (want.m1 && !local.installed) local = { ...local, ...(await api.downloadModels()) };
+          if (want.edge && !edge.installed) edge = { ...edge, ...(await api.downloadModels('edge')) };
+          draw();
+          return;
+        }
         if (step !== 'keys') return next();
         // the last shortcut ends setup and opens the app
         recorder.stop();
@@ -195,12 +220,14 @@
       function draw() {
         const i = steps.indexOf(step);
         const last = step === 'keys' && keyIndex === KEYS.length - 1;
-        const cont = UI.btn(last ? 'Start using Murmint' : 'Continue', { variant: 'primary', onClick: () => onContinue(cont) });
+        const cont = UI.btn(last ? 'Start using Murmint' : step === 'speech' && !started ? 'Download' : 'Continue', { variant: 'primary', onClick: () => onContinue(cont) });
         cont.classList.add('next');
         cont.disabled = !canContinue();
         const canBack = i > 0 && !(i === 1 && user) && !signing && step !== 'speech';
+        // no download needed: speech can use an AI provider added under Models instead
+        const skip = step === 'speech' && !(started && canContinue()) ? UI.btn('Skip', { variant: 'ghost', onClick: next }) : null;
         const foot = h('footer', { class: 'onb-foot' },
-          canBack ? UI.btn('Back', { variant: 'ghost', onClick: back }) : h('span'),
+          canBack ? UI.btn('Back', { variant: 'ghost', onClick: back }) : skip || h('span'),
           h('div', { class: 'onb-dots', 'aria-label': `Step ${i + 1} of ${steps.length}` }, steps.map((_, n) => h('i', { class: n <= i ? 'on' : '' }))),
           cont);
         foot.firstChild.classList.add('back');

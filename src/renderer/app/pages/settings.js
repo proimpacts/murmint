@@ -199,7 +199,7 @@
       const cfg = App.cfg();
       root.append(UI.pageHead('Settings', 'How Murmint listens, types and looks.'));
       root.append(h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([id, label, ic]) => h('button', { class: 'tab', role: 'tab', 'aria-selected': String(tab === id), on: { click: () => { tab = id; App.render(); } } }, icon(tab === id ? `${ic}:on` : ic), label))));
-      root.append(...panels[tab](cfg));
+      root.append(...panels[tab](cfg).filter(Boolean));
     },
   };
 })();

@@ -147,7 +147,7 @@ async function memoryUse() {
 function wireIpc() {
   for (const ch of ['state:get', 'config:set', 'provider:save', 'provider:remove', 'provider:key', 'provider:test', 'provider:presets', 'provider:models', 'provider:list', 'keys:capture', 'keys:down',
     'history:clear', 'history:delete', 'history:query', 'clipboard:write', 'usage:summary', 'usage:reset', 'router:preview', 'format:try',
-    'session:action', 'session:undo', 'local:status', 'local:download', 'local:cancel',
+    'session:action', 'session:undo', 'local:status', 'local:download', 'local:cancel', 'local:remove',
     'account:get', 'account:cancel', 'update:check', 'update:get', 'site:icon']) {
     ipcMain.handle(ch, (_e, ...a) => core.ui(ch, ...a));
   }
@@ -161,7 +161,7 @@ function wireIpc() {
   // the code shows in the window while the engine waits for it to be used, up to its expiry
   ipcMain.handle('account:signIn', () => slowUi('account:signIn', 16 * 60000));
   ipcMain.handle('account:signOut', async () => { await core.ui('account:signOut'); await gate(); });
-  ipcMain.handle('onboarding:get', async () => ({ user: shell.state?.account || null, open: isOpen(), local: await core.ui('local:status') }));
+  ipcMain.handle('onboarding:get', async () => ({ user: shell.state?.account || null, open: isOpen(), local: await core.ui('local:status'), edge: await core.ui('local:status', 'edge') }));
   ipcMain.handle('onboarding:finish', async () => {
     store.set('onboarded', true);
     await useDefaults();
@@ -197,7 +197,7 @@ function wireIpc() {
     if (a === 'min') w.minimize(); else if (a === 'max') (w.isMaximized() ? w.unmaximize() : w.maximize()); else if (a === 'close') w.close();
   });
   ipcMain.on('overlay:hover', (_e, hovering) => {
-    if (windows.drag) return;
+    if (windows.drag || windows._faded) return;
     windows.overlay?.setIgnoreMouseEvents(!hovering, { forward: true });
   });
   ipcMain.on('overlay:drag', (_e, phase, p) => windows.dragOverlay(phase, p || {}));
@@ -242,6 +242,7 @@ app.whenReady().then(async () => {
   shell.config = shell.config || shell.state.config;
   windows = new Windows(store);
   windows.onRaise = (hwnd) => core.ui('overlay:raise', hwnd).catch(() => {});
+  windows.onFullScreen = (hwnd) => core.ui('overlay:fullscreen', hwnd).then((r) => r === true).catch(() => false);
   windows.onOverlayLost = () => { if (capture) { const sid = capture.sid; capture = null; core.send('rec:error', 'Overlay restarted', sid); core.ui('session:action', 'cancel').catch(() => {}); } };
   windows.onMainClosed = () => { if (!windows.quitting && shell.config?.general?.runInBackground === false) app.quit(); };
   migrateSecrets();

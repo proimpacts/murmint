@@ -283,6 +283,48 @@ mod win {
         }
     }
 
+    // A video fills the whole screen on the same screen as the pill: a browser in full screen (YouTube, Netflix) or a
+    // video player. Other apps that cover the screen, like Discord or a game, keep the pill.
+    pub fn foreground_full_screen(overlay: isize) -> bool {
+        const VIDEO: &[&str] = &[
+            "chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "arc", "zen", "librewolf", "waterfox",
+            "vlc", "mpv", "mpc-hc", "mpc-hc64", "mpc-be", "mpc-be64", "potplayer", "potplayermini64", "wmplayer",
+            "video.ui", "microsoft.media.player", "netflix", "plex", "kodi", "stremio", "jellyfin media player",
+        ];
+        let (name, title, _) = foreground_full();
+        let name = name.to_lowercase();
+        // Store apps (Netflix, Disney+, Media Player) all run inside ApplicationFrameHost, so those go by the title
+        let store_video = name == "applicationframehost"
+            && ["netflix", "disney", "prime video", "hulu", "media player", "movies", "youtube", "twitch", "plex"]
+                .iter()
+                .any(|t| title.to_lowercase().contains(t));
+        if !VIDEO.contains(&name.as_str()) && !store_video {
+            return false;
+        }
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.0.is_null() {
+                return false;
+            }
+            let screen = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+            if overlay != 0 && MonitorFromWindow(HWND(overlay as _), MONITOR_DEFAULTTONEAREST) != screen {
+                return false;
+            }
+            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let mut r = RECT::default();
+            if !GetMonitorInfoW(screen, &mut info).as_bool() || GetWindowRect(fg, &mut r).is_err() {
+                return false;
+            }
+            // Full screen is exactly the monitor. A maximised window hangs a few pixels past every edge (its hidden
+            // borders) and stops at the taskbar, so it never matches, even when the browser was maximised first.
+            let m = info.rcMonitor;
+            (r.left - m.left).abs() <= 1 && (r.top - m.top).abs() <= 1 && (r.right - m.right).abs() <= 1 && (r.bottom - m.bottom).abs() <= 1
+        }
+    }
+
     // trim the working set
     pub fn trim_working_set(pid: u32) -> bool {
         unsafe {
@@ -354,12 +396,25 @@ mod win {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let auto: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
             let el = auto.GetFocusedElement().ok()?;
+            let mut read_only = false;
             if let Ok(p) = el.GetCurrentPattern(UIA_ValuePatternId) {
                 if let Ok(vp) = p.cast::<IUIAutomationValuePattern>() {
                     if let Ok(ro) = vp.CurrentIsReadOnly() {
-                        return Some(!ro.as_bool());
+                        if !ro.as_bool() {
+                            return Some(true);
+                        }
+                        read_only = true;
                     }
                 }
+            }
+            // Rich editors (Discord, Slack, Word, web pages' message boxes) often say "read-only" on the part that
+            // has focus while a blinking cursor sits in it, so a live cursor, or an editable box around the focused
+            // part, counts as a text box too.
+            if caret_active(&el) || editable_parent(&auto, &el) || win32_caret() || chromium_typing(&el) {
+                return Some(true);
+            }
+            if read_only {
+                return Some(false);
             }
             let ct = el.CurrentControlType().map(|c| c.0).unwrap_or(0);
             if ct == UIA_EditControlTypeId.0 || ct == UIA_DocumentControlTypeId.0 {
@@ -381,8 +436,101 @@ mod win {
             if KNOWN.iter().any(|k| class.contains(k)) {
                 return Some(true);
             }
-            Some(false)
+            // Only say "no text box" when the focus is clearly somewhere you can't type: a button, link, list, menu,
+            // the desktop or the taskbar. Anything else gets the paste, and the text is still in History if it misses.
+            Some(!not_typeable(&el))
         }
+    }
+
+    unsafe fn not_typeable(el: &IUIAutomationElement) -> bool {
+        let ct = el.CurrentControlType().map(|c| c.0).unwrap_or(0);
+        let shell = {
+            let mut buf = [0u16; 64];
+            let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(GetForegroundWindow(), &mut buf);
+            let c = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+            ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"].contains(&c.as_str())
+        };
+        shell || ct_not_typeable(ct)
+    }
+
+    // focus on one of these means there is no text box to type into
+    fn ct_not_typeable(ct: i32) -> bool {
+        [
+            UIA_ButtonControlTypeId.0, UIA_HyperlinkControlTypeId.0, UIA_MenuItemControlTypeId.0, UIA_MenuBarControlTypeId.0,
+            UIA_ListItemControlTypeId.0, UIA_ListControlTypeId.0, UIA_TabItemControlTypeId.0, UIA_CheckBoxControlTypeId.0,
+            UIA_RadioButtonControlTypeId.0, UIA_ImageControlTypeId.0, UIA_TreeItemControlTypeId.0, UIA_TreeControlTypeId.0,
+            UIA_SliderControlTypeId.0, UIA_ScrollBarControlTypeId.0, UIA_DataItemControlTypeId.0,
+        ]
+        .contains(&ct)
+    }
+
+    /// What has focus, for History when Murmint couldn't find a text box.
+    pub fn focus_description() -> String {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else { return String::new() };
+            let Ok(el) = auto.GetFocusedElement() else { return "nothing focused".into() };
+            let ct = el.CurrentControlType().map(|c| c.0).unwrap_or(0);
+            let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+            let name: String = el.CurrentName().map(|b| b.to_string()).unwrap_or_default().chars().take(40).collect();
+            format!("focus: control {ct}, class \"{class}\", name \"{name}\"")
+        }
+    }
+
+    unsafe fn caret_active(el: &IUIAutomationElement) -> bool {
+        let Ok(p) = el.GetCurrentPattern(UIA_TextPattern2Id) else { return false };
+        let Ok(tp) = p.cast::<IUIAutomationTextPattern2>() else { return false };
+        let mut active = windows::Win32::Foundation::BOOL(0);
+        tp.GetCaretRange(&mut active).is_ok() && active.as_bool()
+    }
+
+    unsafe fn editable_parent(auto: &IUIAutomation, el: &IUIAutomationElement) -> bool {
+        let Ok(walker) = auto.ControlViewWalker() else { return false };
+        let mut cur = el.clone();
+        for _ in 0..3 {
+            let Ok(parent) = walker.GetParentElement(&cur) else { return false };
+            let ct = parent.CurrentControlType().map(|c| c.0).unwrap_or(0);
+            if ct == UIA_EditControlTypeId.0 {
+                if let Ok(p) = parent.GetCurrentPattern(UIA_ValuePatternId) {
+                    if let Ok(vp) = p.cast::<IUIAutomationValuePattern>() {
+                        if vp.CurrentIsReadOnly().is_ok_and(|ro| !ro.as_bool()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            if caret_active(&parent) {
+                return true;
+            }
+            cur = parent;
+        }
+        false
+    }
+
+    // Chrome, Edge and Electron apps (VS Code and its Claude panel, Discord, Slack) build their accessibility tree only
+    // once something asks for it, so the first look often sees the page instead of the box. Inside one of those windows,
+    // anything focused that isn't clearly a button, link or menu is taken as a text box.
+    unsafe fn chromium_typing(el: &IUIAutomationElement) -> bool {
+        // Chrome and Edge give focus to their top window (Chrome_WidgetWin_1) or a render child, Firefox to
+        // MozillaWindowClass; all of them report web text boxes late or as the whole page
+        const WEB: [&str; 4] = ["Chrome_RenderWidgetHostHWND", "Chrome_WidgetWin_1", "Chrome_WidgetWin_0", "MozillaWindowClass"];
+        let class_of = |h: isize| {
+            let mut buf = [0u16; 64];
+            let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(HWND(h as _), &mut buf);
+            String::from_utf16_lossy(&buf[..n.max(0) as usize])
+        };
+        let fg = GetForegroundWindow();
+        let focus = gui_focus_hwnd(fg);
+        let web = [focus, fg.0 as isize].iter().any(|&h| h != 0 && WEB.contains(&class_of(h).as_str()));
+        web && !ct_not_typeable(el.CurrentControlType().map(|c| c.0).unwrap_or(0))
+    }
+
+    // classic Windows apps show a system caret in the box being typed in
+    unsafe fn win32_caret() -> bool {
+        let fg = GetForegroundWindow();
+        let tid = GetWindowThreadProcessId(fg, None);
+        let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        GetGUIThreadInfo(tid, &mut info).is_ok() && !info.hwndCaret.0.is_null()
     }
 
     pub fn browser_host() -> Option<String> {
@@ -512,36 +660,25 @@ mod win {
 
     pub fn matches_target(expected: &super::TargetIdentity) -> bool {
         unsafe {
+            // Still the same window: switching apps or windows always stops the paste.
             let fg = GetForegroundWindow();
             let fg_hwnd = fg.0 as isize;
             if fg_hwnd == 0 || fg_hwnd != expected.fg_hwnd {
                 return false;
             }
+            // Still the same part of it, when Windows can tell (classic apps give each box its own child window).
             let cur_gui = gui_focus_hwnd(fg);
-            let uia = uia_focus_info();
-            if expected.focus_hwnd != 0 {
-                let cur_focus = if cur_gui != 0 {
-                    cur_gui
-                } else {
-                    uia.as_ref().map(|u| u.0).unwrap_or(0)
-                };
-                if cur_focus != expected.focus_hwnd {
-                    return false;
-                }
+            if expected.focus_hwnd != 0 && cur_gui != 0 && cur_gui != expected.focus_hwnd {
+                return false;
             }
-            if let Some((_, ct, aid, cls)) = uia {
-                let had_uia = expected.control_type != 0
-                    || !expected.automation_id.is_empty()
-                    || !expected.class_name.is_empty();
-                if had_uia
-                    && (ct != expected.control_type
-                        || aid != expected.automation_id
-                        || cls != expected.class_name)
-                {
-                    return false;
-                }
+            // Browsers (ChatGPT, Claude, Gmail…), Electron apps (Discord, Slack, VS Code) and many others build their
+            // accessibility details lazily, so the same text box reports a different element, class or id from one
+            // look to the next. Comparing those details made pastes there fail as "focus moved". Inside the same
+            // window, only a move to something else that you clearly can't type in (a button, link, menu, list…) stops it.
+            match uia_focus_info() {
+                Some((_, ct, _, _)) => ct == expected.control_type || !ct_not_typeable(ct),
+                None => true,
             }
-            true
         }
     }
 
@@ -1001,6 +1138,12 @@ mod win {
         0.0
     }
     pub fn raise_under_taskbar(_overlay: isize) {}
+    pub fn foreground_full_screen(_overlay: isize) -> bool {
+        false
+    }
+    pub fn focus_description() -> String {
+        String::new()
+    }
     pub fn trim_working_set(_pid: u32) -> bool {
         false
     }
@@ -1354,6 +1497,12 @@ pub fn browser_host() -> Option<String> {
 
 pub fn raise_under_taskbar(overlay: isize) {
     win::raise_under_taskbar(overlay)
+}
+pub fn foreground_full_screen(overlay: isize) -> bool {
+    win::foreground_full_screen(overlay)
+}
+pub fn focus_description() -> String {
+    win::focus_description()
 }
 pub fn trim_working_set(pid: u32) -> bool {
     win::trim_working_set(pid)

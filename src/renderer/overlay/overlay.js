@@ -105,7 +105,8 @@
     if (iconFor !== key) return;
     if (!url) { appico.hidden = true; return; }
     const shape = await iconShape(url).catch(() => null);
-    if (iconFor !== key) return;
+    // the pill may have gone back to rest while the icon loaded: it stays hidden then
+    if (iconFor !== key || state === 'idle') return;
     appico.classList.toggle('round', !!(shape && shape.round));
     appico.firstElementChild.src = shape && shape.round ? shape.cropped : url;
     appico.hidden = false;
@@ -170,8 +171,7 @@
       label.textContent = s.label || LABEL[state] || '';
     }
     if (state === 'listening' || state === 'paused' || state === 'processing') { clearTimeout(hideTimer); hideTimer = 0; say(''); }
-    if (s.exe || s.site) showAppIcon(s.exe, s.site);
-    if (state === 'idle') appico.hidden = true;
+    if (state === 'idle') { appico.hidden = true; iconFor = ''; } else if (s.exe || s.site) showAppIcon(s.exe, s.site);
     if (state === 'listening' && s.starting) blip(660);
     if (state === 'processing' && prevState === 'listening') blip(440);
     if (state === 'success') {

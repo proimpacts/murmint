@@ -37,13 +37,15 @@
     if (!p.vocabulary.length) {
       list.append(h('div', { class: 'muted', style: { padding: '28px 22px', textAlign: 'center' } },
         'No words yet. Just dictate: names and terms Murmint hears in several sentences show up here to add.'));
-    }
-    for (const v of p.vocabulary) {
-      const badge = (v.note === 'suggested' || v.note === 'auto') ? UI.badge('Suggested', 'accent') : v.note === 'voice' ? UI.badge('Said aloud', 'accent') : null;
-      list.append(h('div', { class: 'item' },
-        h('div', { class: 'flex between' },
-          h('div', { class: 'flex' }, h('b', { style: { fontSize: '15px' } }, v.term), badge),
-          UI.btn('', { icon: 'trash', variant: 'ghost icon', title: 'Remove', onClick: () => App.set('personal.vocabulary', p.vocabulary.filter((x) => x.id !== v.id), { render: true }) }))));
+    } else {
+      const chips = h('div', { class: 'chips vocab-chips' });
+      for (const v of p.vocabulary) {
+        const label = (v.note === 'suggested' || v.note === 'auto') ? 'Suggested' : v.note === 'voice' ? 'Said aloud' : '';
+        const chip = UI.chip(v.term, () => App.set('personal.vocabulary', p.vocabulary.filter((x) => x.id !== v.id), { render: true }));
+        if (label) { chip.classList.add('learned'); chip.title = label; }
+        chips.append(chip);
+      }
+      list.append(chips);
     }
     box.append(list);
     return box;

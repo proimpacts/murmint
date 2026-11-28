@@ -221,34 +221,53 @@
 
   const LOCAL = 'murmint-local';
   const M1 = `${LOCAL}::whisper-tiny`;
+  const EDGE_ID = 'murmint-edge', EDGE = `${EDGE_ID}::sensevoice-small`;
+  const onThisPc = (p) => p && (p.id === LOCAL || p.id === EDGE_ID);
 
-  // Murmint 1's download, shown inside the Speech panel. Progress repaints only that line.
-  let localSt = null, paintLocal = null;
+  // Murmint's own speech models (Murmint 1 and Murmint Edge), shown inside the Speech panel: download, progress and
+  // delete. Progress repaints only that model's line.
+  const LOCAL_MODELS = {
+    m1: { key: undefined, name: 'Murmint 1', note: 'Free, private, works offline.' },
+    edge: { key: 'edge', name: 'Murmint Edge', note: 'Faster and better with accents. Free, private, works offline.' },
+  };
+  const localSt = { m1: null, edge: null }, paintLocal = {};
   api.on('local:progress', (p) => {
-    if (!localSt) return;
-    localSt = { ...localSt, ...p, installed: p.state === 'installed' || localSt.installed };
-    if (paintLocal) paintLocal();
+    const id = p.model === 'edge' ? 'edge' : 'm1';
+    if (!localSt[id]) return;
+    localSt[id] = { ...localSt[id], ...p, installed: p.state === 'installed' || (localSt[id].installed && p.state !== 'none') };
+    if (paintLocal[id]) paintLocal[id]();
   });
-  function murmint1Line() {
+  function modelLine(id) {
+    const { key, name, note } = LOCAL_MODELS[id];
     const line = h('div', { class: 'm1' });
     const draw = () => {
-      const st = localSt;
-      if (!st) { line.replaceChildren(h('span', { class: 'muted' }, 'Checking Murmint 1…')); return; }
+      const st = localSt[id];
+      if (!st) { line.replaceChildren(h('span', { class: 'muted' }, `Checking ${name}…`)); return; }
       const mb = (n) => Math.max(1, Math.round(n / 1024 ** 2)) + ' MB';
       let right;
       if (st.state === 'downloading') {
         const pct = st.total ? Math.min(100, Math.round(((st.received || 0) / st.total) * 100)) : 0;
         right = h('div', { class: 'm1-dl' }, h('div', { class: 'onb-bar' }, h('i', { style: { width: pct + '%' } })), h('span', { class: 'muted tnum' }, pct + '%'),
-          UI.btn('Cancel', { variant: 'ghost sm', onClick: () => api.cancelModels() }));
+          UI.btn('Cancel', { variant: 'ghost sm', onClick: () => api.cancelModels(key) }));
       } else if (!st.installed) {
-        right = UI.btn(`Download ${mb(st.size)}`, { variant: 'sm', icon: 'download', onClick: async () => { localSt = { ...localSt, ...(await api.downloadModels()) }; draw(); } });
-      } else right = h('span', { class: 'm1-ok' }, window.icon('check'), 'On this computer');
+        right = UI.btn(`Download ${mb(st.size)}`, { variant: 'sm', icon: 'download', onClick: async () => { localSt[id] = { ...localSt[id], ...(await api.downloadModels(key)) }; draw(); } });
+      } else {
+        right = h('div', { class: 'm1-dl' }, h('span', { class: 'm1-ok' }, window.icon('check'), 'On this computer'),
+          UI.btn('', { icon: 'trash', variant: 'ghost icon', title: `Delete ${name}`, onClick: () => removeModel(id) }));
+      }
       line.replaceChildren(h('img', { src: '../assets/logo.svg', alt: '' }),
-        h('div', { class: 'grow' }, h('b', null, 'Murmint 1'), h('span', null, st.error || 'Free, private, works offline.')), right);
+        h('div', { class: 'grow' }, h('b', null, name), h('span', null, st.error || note)), right);
     };
-    paintLocal = draw;
+    paintLocal[id] = draw;
     draw();
     return line;
+  }
+  async function removeModel(id) {
+    const { key, name } = LOCAL_MODELS[id];
+    if (!(await UI.confirm(`Delete ${name} from this computer? You can download it again any time.`, 'Delete'))) return;
+    localSt[id] = { ...localSt[id], ...(await api.removeModel(key)), installed: false };
+    App.S = await api.getState();
+    App.render();
   }
 
   // One job (speech or formatting): what it uses now, and how that is chosen.
@@ -262,7 +281,7 @@
     const ref = task === 'stt' ? preview?.stt?.ref || (job.routing === 'manual' ? job.primary : '') :
       job.routing === 'manual' ? job.primary : preview?.chat?.[0]?.ref;
     const p = App.providerOfRef(ref);
-    const ready = p && (p.id === LOCAL || App.S.providerStatus[p.id]?.ready);
+    const ready = p && (onThisPc(p) || App.S.providerStatus[p.id]?.ready);
 
     // formatting offers the models you picked under AI services; speech offers every speech model of a ready service,
     // so streaming models can be picked without adding them first
@@ -273,8 +292,9 @@
     const options = [
       { value: AUTO, label: 'Automatic pick' },
       { value: CHEAP, label: 'Cheapest' },
-      ...(task === 'stt' ? [{ group: 'On this computer', options: [{ value: M1, label: 'Murmint 1 (free)' }] }] : []),
-      ...groups.map((g) => ({ ...g, options: g.options.filter((o) => o.value !== M1) })).filter((g) => g.options.length),
+      ...(task === 'stt' ? [{ group: 'On this computer', options: [{ value: M1, label: 'Murmint 1 (free)' },
+        ...(App.cfg().providers.some((x) => x.id === EDGE_ID) ? [{ value: EDGE, label: 'Murmint Edge (free)' }] : [])] }] : []),
+      ...groups.map((g) => ({ ...g, options: g.options.filter((o) => o.value !== M1 && o.value !== EDGE) })).filter((g) => g.options.length),
     ];
     const pick = (v) => {
       if (v === AUTO || v === CHEAP) App.set(`${path}.routing`, v === AUTO ? 'auto' : 'cheapest', { render: true });
@@ -286,7 +306,7 @@
       h('div', { class: 'mjob-now' },
         h('div', { class: 'grow' },
           h('div', { class: 'mjob-model' }, ref ? App.refLabel(ref) : 'Nothing set up yet'),
-          h('div', { class: 'mjob-via' }, h('span', { class: `dot ${ready ? 'good' : 'warn'}` }), ref ? (p?.id === LOCAL ? 'On this computer' : p?.name || 'Removed provider') : 'Add an AI service below',
+          h('div', { class: 'mjob-via' }, h('span', { class: `dot ${ready ? 'good' : 'warn'}` }), ref ? (onThisPc(p) ? 'On this computer' : p?.name || 'Removed provider') : 'Add an AI service below',
             task === 'stt' && preview?.stt?.stream ? ' · Live' : '')),
         h('div', { class: 'mjob-pickbox' }, UI.select(options, value, pick, 'w-full'), h('span', null, how))));
     if (job.routing === 'manual') panel.append(h('div', { class: 'mjob-pick' }, backups(`${path}.fallbacks`, job.fallbacks || [], task, [job.primary])));
@@ -296,7 +316,7 @@
 
 
   function providersLine() {
-    const ready = App.cfg().providers.filter((p) => p.id !== LOCAL && App.S.providerStatus[p.id]?.ready && p.models.some((m) => m.task === 'chat'));
+    const ready = App.cfg().providers.filter((p) => !onThisPc(p) && App.S.providerStatus[p.id]?.ready && p.models.some((m) => m.task === 'chat'));
     return h('div', { class: 'm1' }, h('span', { class: 'm1-ic' }, icon('key')),
       h('div', { class: 'grow' }, h('b', null, ready.length ? `${ready.length} provider${ready.length === 1 ? '' : 's'} ready` : 'No provider yet'),
         h('span', null, ready.length ? ready.map((p) => p.name).join(', ') : 'Add a key so Murmint can format your words.')),
@@ -376,7 +396,7 @@
 
   function servicesPanel() {
     const shownRefs = new Set(App.cfg().shownModels || []);
-    const services = App.cfg().providers.filter((p) => p.id !== LOCAL && (!p.builtin || App.S.providerStatus[p.id]?.hasKey || p.models.some((m) => shownRefs.has(`${p.id}::${m.id}`))));
+    const services = App.cfg().providers.filter((p) => !onThisPc(p) && (!p.builtin || App.S.providerStatus[p.id]?.hasKey || p.models.some((m) => shownRefs.has(`${p.id}::${m.id}`))));
     const ready = services.filter((p) => App.S.providerStatus[p.id]?.ready).length;
     const fmt = App.cfg().models.format;
     const inUse = fmt.routing === 'manual' ? fmt.primary : preview?.chat?.[0]?.ref;
@@ -449,8 +469,8 @@
   async function load(key) {
     loading = true;
     try {
-      const [r, st] = await Promise.all([api.routerPreview(), localSt ? localSt : api.localModels(), new Promise((ok) => setTimeout(ok, 260))]);
-      preview = r; localSt = st; shownFor = key; justLoaded = true;
+      const [r, m1, edge] = await Promise.all([api.routerPreview(), localSt.m1 || api.localModels(), localSt.edge || api.localModels('edge'), new Promise((ok) => setTimeout(ok, 260))]);
+      preview = r; localSt.m1 = m1; localSt.edge = edge; shownFor = key; justLoaded = true;
     } catch { shownFor = key; }
     loading = false;
     if (App.page === 'models') App.render();
@@ -482,7 +502,7 @@
       root.append(h('div', { class: 'tabs', role: 'tablist' }, [['stt', 'Speech to text', 'mic'], ['chat', 'Formatting', 'textsize']].map(([id, label, ic]) =>
         h('button', { class: 'tab', role: 'tab', 'aria-selected': String(tab === id), on: { click: () => { tab = id; App.render(); } } }, icon(ic), label))));
       root.append(tab === 'stt'
-        ? jobPanel({ task: 'stt', cfgKey: 'stt', extra: murmint1Line() })
+        ? jobPanel({ task: 'stt', cfgKey: 'stt', extra: [modelLine('m1'), modelLine('edge')] })
         : jobPanel({ task: 'chat', cfgKey: 'format', extra: [longText, providersLine()] }));
 
       root.append(servicesPanel());

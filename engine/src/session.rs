@@ -1614,6 +1614,10 @@ async fn commit(sid: u64, raw: &str, sec: f64, stt_ref: Option<String>, stt_cost
     let autotype_on = cfg()["dictation"]["autoType"] != json!(false);
     if !insertion::target_editable().await {
         if !(autotype_on && insertion::autotype().await) {
+            // say what had focus, so a text box Murmint missed can be found from History
+            let seen = tokio::task::spawn_blocking(crate::native::focus_description).await.unwrap_or_default();
+            let mut f = f.clone();
+            f.reason = format!("No text box found ({seen})");
             save_history(sid, raw, &text, sec, stt_ref, stt_cost, &f, &ctx, false);
             return;
         }
@@ -1663,6 +1667,11 @@ async fn commit(sid: u64, raw: &str, sec: f64, stt_ref: Option<String>, stt_cost
             res.error.as_deref().unwrap_or("Couldn’t paste automatically — click Copy on the pill")
         };
         toast("info", msg);
+    }
+    let mut f = f;
+    if !res.ok {
+        // why it wasn't typed, so a miss can be traced from History
+        f.reason = format!("Not typed ({}): {}", res.method, res.error.as_deref().unwrap_or("no reason given"));
     }
     save_history(sid, raw, &text, sec, stt_ref, stt_cost, &f, &ctx, res.ok);
 }
@@ -1741,6 +1750,10 @@ pub fn test_reset() {
     g.notice = None;
     g.extra_cost = 0.0;
     INFLIGHT.store(0, Ordering::SeqCst);
+}
+#[cfg(all(test, local_tests))]
+pub fn test_sid() -> u64 {
+    *GENERATION.borrow()
 }
 #[cfg(all(test, local_tests))]
 pub fn test_inflight() -> usize {
