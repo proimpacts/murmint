@@ -315,14 +315,6 @@
   }
 
 
-  function providersLine() {
-    const ready = App.cfg().providers.filter((p) => !onThisPc(p) && App.S.providerStatus[p.id]?.ready && p.models.some((m) => m.task === 'chat'));
-    return h('div', { class: 'm1' }, h('span', { class: 'm1-ic' }, icon('key')),
-      h('div', { class: 'grow' }, h('b', null, ready.length ? `${ready.length} provider${ready.length === 1 ? '' : 's'} ready` : 'No provider yet'),
-        h('span', null, ready.length ? ready.map((p) => p.name).join(', ') : 'Add a key so Murmint can format your words.')),
-      UI.btn('Add a provider', { variant: 'sm', icon: 'plus', onClick: () => serviceModal() }));
-  }
-
   // The page is redrawn from the engine's saved state after every change made here, so it never shows old data
   async function refresh() {
     App.S = await api.getState();
@@ -503,7 +495,7 @@
         h('button', { class: 'tab', role: 'tab', 'aria-selected': String(tab === id), on: { click: () => { tab = id; App.render(); } } }, icon(ic), label))));
       root.append(tab === 'stt'
         ? jobPanel({ task: 'stt', cfgKey: 'stt', extra: [modelLine('m1'), modelLine('edge')] })
-        : jobPanel({ task: 'chat', cfgKey: 'format', extra: [longText, providersLine()] }));
+        : jobPanel({ task: 'chat', cfgKey: 'format', extra: [longText] }));
 
       root.append(servicesPanel());
 

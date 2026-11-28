@@ -9,6 +9,30 @@
   let reqGen = 0;
   let busy = false;
   const open = new Set(); // entries showing what was actually said
+  let summary = null, counts = { n: 0, words: 0 };
+  const summaryText = () => `${counts.n} dictation${counts.n === 1 ? '' : 's'} · ${new Intl.NumberFormat().format(counts.words)} words, kept only on this PC.`;
+
+  // Changes made on this page are drawn in place, so the page isn't rebuilt (and nothing jumps) while the engine saves
+  // them. App skips the redraw that the saved state would otherwise cause.
+  const quiet = () => { App._ownAt = Date.now(); };
+
+  // grows or shrinks an element's height smoothly, so what is under it slides instead of jumping
+  function slide(el, show, done) {
+    const from = show ? 0 : el.offsetHeight;
+    el.style.overflow = 'hidden';
+    el.style.height = from + 'px';
+    el.style.opacity = show ? '0' : '1';
+    requestAnimationFrame(() => {
+      el.style.transition = 'height 260ms var(--out, ease), opacity 200ms ease, margin 260ms var(--out, ease), padding 260ms var(--out, ease)';
+      el.style.height = (show ? el.scrollHeight : 0) + 'px';
+      el.style.opacity = show ? '1' : '0';
+      if (!show) { el.style.marginTop = '0'; el.style.marginBottom = '0'; el.style.paddingTop = '0'; el.style.paddingBottom = '0'; }
+      setTimeout(() => {
+        if (show) { el.style.height = ''; el.style.overflow = ''; el.style.transition = ''; }
+        if (done) done();
+      }, 280);
+    });
+  }
   const dayLabel = (ts) => {
     const d = new Date(ts), today = new Date();
     const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
@@ -37,16 +61,41 @@
     const copyBtn = h('button', { class: 'hact', type: 'button', title: 'Copy' }, icon('copy'));
     copyBtn.addEventListener('click', (ev) => { ev.stopPropagation(); copy(copyBtn); });
     const rawBtn = h('button', { class: `hact${open.has(e.id) ? ' on' : ''}`, type: 'button', title: typed ? 'What you typed' : 'What you said' }, icon(typed ? 'type' : 'mic'));
-    rawBtn.addEventListener('click', (ev) => { ev.stopPropagation(); open.has(e.id) ? open.delete(e.id) : open.add(e.id); App.render(); });
+    rawBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const body = row.querySelector('.hbody');
+      const shown = body.querySelector('.hraw');
+      if (open.has(e.id)) {
+        open.delete(e.id);
+        rawBtn.classList.remove('on');
+        if (shown) slide(shown, false, () => shown.remove());
+      } else if (e.raw) {
+        open.add(e.id);
+        rawBtn.classList.add('on');
+        const raw = rawBox();
+        body.append(raw);
+        slide(raw, true);
+      }
+    });
+    const rawBox = () => h('div', { class: 'hraw' }, h('span', null, typed ? 'What you typed' : 'What you said'), e.raw);
     const delBtn = h('button', { class: 'hact bad', type: 'button', title: 'Delete' }, icon('trash'));
     delBtn.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      row.classList.add('leaving');
-      setTimeout(() => {
-        extra = extra.filter((x) => x.id !== e.id);
-        if (searchRes) searchRes = { ...searchRes, items: searchRes.items.filter((x) => x.id !== e.id) };
-        api.deleteHistory(e.id);
-      }, 220);
+      extra = extra.filter((x) => x.id !== e.id);
+      if (searchRes) searchRes = { ...searchRes, items: searchRes.items.filter((x) => x.id !== e.id) };
+      quiet();
+      api.deleteHistory(e.id);
+      counts = { n: Math.max(0, counts.n - 1), words: Math.max(0, counts.words - (e.words || 0)) };
+      if (summary) summary.textContent = summaryText();
+      // the row folds away and the ones under it slide up; an emptied day loses its heading too
+      const day = row.previousElementSibling;
+      const next = row.nextElementSibling;
+      slide(row, false, () => {
+        row.remove();
+        if (day?.classList.contains('hday') && (!next || next.classList.contains('hday'))) slide(day, false, () => day.remove());
+        // the last one gone: show the empty page
+        if (!document.querySelector('.hbox .hrow')) App.render();
+      });
     });
     const meta = [e.app, `${e.words} word${e.words === 1 ? '' : 's'}`, typed ? 'formatted from typed text' : '', e.edited ? 'edited' : ''].filter(Boolean).join(' · ');
     const row = h('article', { class: 'hrow', title: 'Click to copy' },
@@ -55,7 +104,7 @@
       h('div', { class: 'hbody' },
         h('div', { class: 'htext' }, text),
         h('div', { class: 'hmeta' }, meta),
-        open.has(e.id) && e.raw ? h('div', { class: 'hraw' }, h('span', null, typed ? 'What you typed' : 'What you said'), e.raw) : ''),
+        open.has(e.id) && e.raw ? rawBox() : ''),
       h('div', { class: 'hacts' }, copyBtn, rawBtn, delBtn));
     row.addEventListener('click', () => { if (!window.getSelection().toString()) copy(copyBtn).then(() => UI.toast('Copied', 'ok')); });
     return row;
@@ -88,7 +137,9 @@
       search.append(input);
       root.append(h('div', { class: 'hhead' }, h('h1', null, 'History'), search,
         totalCount ? UI.btn('', { icon: 'trash', variant: 'icon', title: 'Delete all saved dictations', onClick: () => UI.confirm('Delete all saved dictations?').then((ok) => { if (ok) api.clearHistory(); }) }) : ''));
-      root.append(h('p', { class: 'muted', style: { margin: '-12px 0 20px' } }, `${totalCount} dictation${totalCount === 1 ? '' : 's'} · ${new Intl.NumberFormat().format(totalWords)} words, kept only on this PC.`));
+      counts = { n: totalCount, words: totalWords };
+      summary = h('p', { class: 'muted', style: { margin: '-12px 0 20px' } }, summaryText());
+      root.append(summary);
       if (!App.cfg().privacy.saveHistory) {
         root.append(h('div', { class: 'banner', style: { marginBottom: '16px' } }, icon('lock'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'History is turned off'),
           h('div', { class: 'd' }, 'New dictations are not being saved. You can change this in Settings > Privacy.'))));

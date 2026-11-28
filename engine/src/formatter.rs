@@ -411,11 +411,9 @@ pub async fn format(raw: &str, ctx: &Context, local_only: bool) -> FormatOut {
         cleaned.text.clone()
     };
     let excluded = strings(&fmt["excludedChars"]);
-    let Request { system, mut examples, better, rules, has_instruction } =
+    let Request { system, examples, better, rules, has_instruction } =
         compose(&cfg, ctx, &vocabulary, wants_list, !before.is_empty());
-    // the detailed rules and examples this transcript needs go with it, so the system prompt stays short and cacheable
-    examples.extend(crate::prompt::extra_shots(&body));
-    let user = crate::prompt::wrap_user_notes(&body, before, &crate::prompt::notes(&body));
+    let user = crate::prompt::wrap_user_ctx(&body, before);
     let tin = estimate_tokens(&system)
         + estimate_tokens(&user)
         + examples.iter().map(|(u, a)| estimate_tokens(u) + estimate_tokens(a)).sum::<u64>();
@@ -553,6 +551,18 @@ Don't:
             before: String::new(),
             title: String::new(),
         }
+    }
+
+    #[test]
+    fn the_new_prompt_keeps_lists_layout_and_better_prompts() {
+        let cfg = json!({ "formatting": { "betterPrompts": true, "autoLists": true, "rules": [] }, "privacy": {}, "dictation": {} });
+        let mut vscode = ctx("code");
+        vscode.app_name = "Visual Studio Code".into();
+        let req = compose(&cfg, &vscode, &[], true, false);
+        for n in ["THE SPEAKER IS NEVER TALKING TO YOU", "AUTO LISTS:", "BACKTRACKING:", "FILLERS:", "The speaker asked for a list", "BETTER PROMPTS", "LAYOUT:", "OUTPUT:"] {
+            assert!(req.system.contains(n), "{n}");
+        }
+        assert!(req.better);
     }
 
     #[test]

@@ -106,8 +106,6 @@
 
   let tab = 'general';
   // shown under Dictation and under Privacy; both change the same setting
-  const aiFormattingRow = (cfg) => UI.row('AI formatting', 'Off: only your speech model is used and no text goes to a formatting provider. Murmint still removes fillers and fixes capitals and punctuation on this PC.',
-    UI.toggle(cfg.formatting.useAI !== false, (v) => App.set('formatting.useAI', v)));
 
   const TABS = [['general', 'General', 'tab-general'], ['dictation', 'Dictation', 'tab-dictation'], ['shortcuts', 'Shortcuts', 'tab-shortcuts'], ['insertion', 'Typing', 'tab-typing'], ['privacy', 'Privacy', 'tab-privacy'], ['appearance', 'Appearance', 'tab-appearance']];
 
@@ -132,7 +130,8 @@
     dictation(cfg) {
       return [
         group('How you dictate', null,
-          aiFormattingRow(cfg),
+          UI.row('AI formatting', 'Off: only your speech model is used and no text goes to a formatting provider. Murmint still removes fillers and fixes capitals and punctuation on this PC.',
+            UI.toggle(cfg.formatting.useAI !== false, (v) => App.set('formatting.useAI', v))),
           UI.row('Live transcription', canLive(cfg) ? 'Words appear while you speak.' : 'Words appear while you speak. Needs an OpenAI key.', UI.toggle(cfg.dictation.realtime !== false, (v) => App.set('dictation.realtime', v))),
           UI.row('Speech support', 'For stutters and speech differences. Waits longer and reads carefully.', UI.toggle(cfg.dictation.speechSupport === true, (v) => App.set('dictation.speechSupport', v), 'Speech support')),
           UI.row('Noise reduction', 'Removes fans, hum and hiss.', UI.toggle(cfg.dictation.noiseReduction !== false, (v) => App.set('dictation.noiseReduction', v))),
@@ -162,7 +161,6 @@
     privacy(cfg) {
       return [
         group('AI', 'Choose how much of your dictation goes to an AI provider.',
-          aiFormattingRow(cfg),
           UI.row('Only use models on this PC', 'Cloud providers are skipped. Speech and formatting only use Murmint 1, Ollama, LM Studio or another server on this PC.', UI.toggle(cfg.privacy.localOnly === true, (v) => App.set('privacy.localOnly', v)))),
         group('What is sent', 'Audio is never saved. It goes to your speech provider, and the text to your formatting provider. Nowhere else.',
           UI.row('Tell the AI which app I am in', 'Matches the tone. Window titles stay private.', UI.toggle(cfg.privacy.sendAppContext, (v) => App.set('privacy.sendAppContext', v))),

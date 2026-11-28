@@ -5,16 +5,27 @@ pub fn presets() -> Value {
     serde_json::from_str(include_str!("../data/presets.json")).unwrap_or(json!([]))
 }
 
-fn is_stt(id: &str) -> bool {
-    re!(r"(?i)whisper|transcri|voxtral|\bstt\b|speech-to-text|parakeet").is_match(id).unwrap_or(false)
-}
-fn skip(id: &str) -> bool {
-    // not chat or stt
-    re!(
-        r"(?i)embed|\btts\b|text-to-speech|image|dall-?e|moderation|rerank|guard|realtime|sora|video|diffusion|flux|stable-|audio-preview|ocr"
-    )
-    .is_match(id)
-    .unwrap_or(false)
+/// Which Models section a model belongs in: "stt" for speech to text, "chat" for formatting (text in, text out), or
+/// None for everything else (images, video, voices, music, embeddings, live audio, agents), which is left out of both.
+pub fn kind_of(id: &str) -> Option<&'static str> {
+    let id = id.to_lowercase();
+    // speech to text first, so "gpt-4o-transcribe" or "gemini-transcribe-live" isn't thrown out as audio or live
+    let stt = re!(r"whisper|transcri|voxtral|parakeet|canary|sensevoice|moonshine|\bstt\b|speech-to-text|\basr\b|deepgram|chirp");
+    if stt.is_match(&id).unwrap_or(false) {
+        return Some("stt");
+    }
+    let neither = re!(concat!(
+        r"embed|rerank|moderation|guard|safeguard|classif",                    // not for writing
+        r"|\btts\b|text-to-speech|orpheus|playai|voice|speech|lyria|music|audio", // makes sound
+        r"|native-audio|realtime|\blive\b|computer-use|deep-research",          // live sessions and agents
+        r"|image|imagen|dall-?e|flux|diffusion|stable-|sdxl|recraft|ideogram|seedream|seededit|kolors|hidream|playground|midjourney", // pictures
+        r"|video|veo|sora|kling|\bwan[-0-9]|hailuo|runway|luma",               // video
+        r"|\bocr\b|-ocr"
+    ));
+    if neither.is_match(&id).unwrap_or(false) {
+        return None;
+    }
+    Some("chat")
 }
 
 pub fn parse_model_list(json: &Value, free: bool) -> Vec<Value> {
@@ -30,15 +41,18 @@ pub fn parse_model_list(json: &Value, free: bool) -> Vec<Value> {
         } else {
             r["id"].as_str().or_else(|| r["name"].as_str()).unwrap_or("").to_string()
         };
-        if id.is_empty() || skip(&id) {
-            continue;
-        }
-        if let Some(mods) = r["architecture"]["output_modalities"].as_array() {
-            if !mods.iter().any(|m| m == "text") {
+        let Some(task) = (if id.is_empty() { None } else { kind_of(&id) }) else { continue };
+        // Gemini lists say what a model can do: no generateContent means no text out
+        if let Some(methods) = r["supportedGenerationMethods"].as_array() {
+            if !methods.iter().any(|m| m == "generateContent") {
                 continue;
             }
         }
-        let task = if is_stt(&id) { "stt" } else { "chat" };
+        if let Some(mods) = r["architecture"]["output_modalities"].as_array() {
+            if !mods.iter().any(|m| m == "text") || (task == "chat" && mods.iter().any(|m| m == "image" || m == "audio")) {
+                continue;
+            }
+        }
         let name = r["display_name"].as_str().or_else(|| r["name"].as_str()).filter(|n| !n.is_empty());
         let label = name.filter(|n| *n != id).unwrap_or(&id).trim_start_matches("models/").to_string();
         let mut m = json!({ "id": id, "label": label, "task": task, "tier": "decent" });
@@ -80,6 +94,19 @@ pub fn parse_model_list(json: &Value, free: bool) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_model_lands_in_the_right_section_or_none() {
+        for id in ["whisper-large-v3-turbo", "gpt-4o-mini-transcribe", "gpt-live-transcribe", "models/gemini-3.5-transcribe-live", "@cf/deepgram/nova-3", "distil-whisper-large-v3-en", "voxtral-mini-latest", "parakeet-tdt-0.6b-v3"] {
+            assert_eq!(kind_of(id), Some("stt"), "{id}");
+        }
+        for id in ["gpt-5-mini", "claude-sonnet-5-5", "llama-3.3-70b-versatile", "models/gemini-2.5-flash", "deepseek-chat", "mistral-small-latest", "qwen/qwen3-32b"] {
+            assert_eq!(kind_of(id), Some("chat"), "{id}");
+        }
+        for id in ["dall-e-3", "gpt-image-1", "imagen-4.0-generate-001", "models/gemini-2.5-flash-image", "flux-1.1-pro", "stable-diffusion-xl", "sora-2", "veo-3.0-generate", "tts-1-hd", "gpt-4o-mini-tts", "canopylabs/orpheus-v1-english", "playai-tts", "text-embedding-3-small", "omni-moderation-latest", "llama-guard-4-12b", "models/gemini-2.5-flash-native-audio-latest", "gpt-realtime", "models/gemini-2.5-computer-use-preview-10-2025", "models/deep-research-max-preview-04-2026", "lyria-realtime-exp", "gpt-4o-audio-preview", "mistral-ocr-latest"] {
+            assert_eq!(kind_of(id), None, "{id}");
+        }
+    }
+
     #[test]
     fn model_lists_speech_vs_text_junk_dropped_prices_read() {
         let l = parse_model_list(

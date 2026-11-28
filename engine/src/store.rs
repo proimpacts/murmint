@@ -256,6 +256,7 @@ impl Store {
         let def = defaults();
         let mut cfg = deep_merge(&def, saved);
         cfg["providers"] = reconcile_providers(&def["providers"], &saved["providers"]);
+        sort_models(&mut cfg["providers"]);
         if let (Some(list), Some(gone)) =
             (cfg["providers"].as_array_mut(), saved["removedProviders"].as_array())
         {
@@ -585,6 +586,26 @@ fn deep_merge_shallow(a: &Value, b: &Value) -> Value {
         }
     }
     Value::Object(o)
+}
+
+/// Puts every listed model in the right Models section (speech to text or formatting) and drops ones that are
+/// neither, like image, video and voice models. Models added by hand stay as the person set them.
+fn sort_models(providers: &mut Value) {
+    for p in providers.as_array_mut().into_iter().flatten() {
+        let Some(models) = p["models"].as_array_mut() else { continue };
+        models.retain_mut(|m| {
+            if m["custom"] == json!(true) {
+                return true;
+            }
+            match crate::presets::kind_of(m["id"].as_str().unwrap_or("")) {
+                Some(task) => {
+                    m["task"] = json!(task);
+                    true
+                }
+                None => false,
+            }
+        });
+    }
 }
 
 fn reconcile_providers(ship: &Value, saved: &Value) -> Value {
