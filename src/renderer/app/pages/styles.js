@@ -53,7 +53,7 @@
   function styleRow(cfg, st) {
     const active = st.id === cfg.formatting.style;
     const save = UI.debounce((v) => { App.set('styles', App.cfg().styles.map((x) => (x.id === st.id ? { ...x, instruction: v } : x))); });
-    // a preset card with a radio, as in SayIt: click to use it, the pencil to edit what the AI is told
+    // a preset card with a radio: click to use it, the pencil to edit what the AI is told
     const pick = () => { if (!active) App.set('formatting.style', st.id, { render: true }); };
     const row = h('div', { class: `preset${active ? ' on' : ''}`, role: 'radio', 'aria-checked': String(active), tabindex: 0, on: { click: pick, keydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } } } },
       h('span', { class: 'radio' }),

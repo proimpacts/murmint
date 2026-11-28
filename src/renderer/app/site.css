@@ -1,4 +1,4 @@
-/* Murmint app look. Layout and components follow SayIt (github.com/crosswk/SayIt): a title bar across the top, a
+/* Murmint app look. Layout and components: a title bar across the top, a
    flat sidebar split by a hairline with small icon buttons at the foot, bold page titles, and cards with a thin
    border; a picked card gets a dark outline and a tick. Colour, type and buttons follow murmint.app: Inter, one
    orange for actions, warm black in dark mode. Loaded last, so it decides the look; app.css and theme.css keep the

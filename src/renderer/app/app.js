@@ -74,7 +74,7 @@
       const navBtn = ([id, label, ic]) => h('button', { class: `nav ${App.page === id ? 'active' : ''}`, 'aria-current': App.page === id ? 'page' : undefined, on: { click: () => App.nav(id) } }, window.icon(App.page === id ? `${ic}:on` : ic), label);
       App.groups.forEach(([, items], i) => { if (i) sb.append(h('div', { class: 'nav-sep' })); items.forEach((it) => sb.append(navBtn(it))); });
       sb.append(h('div', { class: 'nav-spacer' }));
-      // the foot: small icon buttons, as in SayIt, and the theme switch
+      // the foot: small icon buttons and the theme switch
       const foot = h('div', { class: 'side-foot' }, ...App.footer.map(([id, label, ic, url]) => url
         ? h('a', { class: 'ibtn', href: url, target: '_blank', rel: 'noopener', title: label, 'aria-label': label }, window.icon(ic))
         : h('button', { class: `ibtn ${App.page === id ? 'active' : ''}`, type: 'button', title: label, 'aria-label': label, on: { click: () => App.nav(id) } }, window.icon(ic))));

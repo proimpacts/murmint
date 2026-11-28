@@ -41,8 +41,9 @@ It also knows where you're typing. A Slack message stays short, an email gets a 
 ## Getting started
 
 1. Grab the installer from [murmint.app/download](https://murmint.app/download).
-2. Open **Models** and paste an API key. Cloudflare and Groq both have free tiers.
-3. Click into any text box, hold <kbd>Ctrl</kbd>+<kbd>Win</kbd> and talk.
+2. During setup, pick your speech model: **Murmint 1**, **Murmint Edge** (faster and better with accents), both, or skip to use an AI provider instead. You can download or delete either later under **Models**.
+3. For formatting, open **Models** and paste an API key. Cloudflare and Groq both have free tiers.
+4. Click into any text box, hold <kbd>Ctrl</kbd>+<kbd>Win</kbd> and talk.
 
 Windows might show a SmartScreen warning because the installer isn't signed yet. **More info → Run anyway** gets past it.
 
